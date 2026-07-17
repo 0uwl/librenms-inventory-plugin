@@ -157,6 +157,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local LibreNMS test credentials (API token)
+/env
+
 # Spyder project settings
 .spyderproject
 .spyproject

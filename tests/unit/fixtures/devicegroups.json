@@ -1,0 +1,8 @@
+{
+    "status": "ok",
+    "groups": [
+        {"id": 1, "name": "Core"},
+        {"id": 2, "name": "Edge"},
+        {"id": 3, "name": "Decommissioned"}
+    ]
+}

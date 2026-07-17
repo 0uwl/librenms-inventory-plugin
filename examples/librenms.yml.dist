@@ -1,0 +1,22 @@
+# Example command line: ansible-inventory -v --list -i librenms.yml
+# Remember to export LIBRENMS_TOKEN: export LIBRENMS_TOKEN=abc
+plugin: librenms
+api_endpoint: https://librenms-host.local/api/v0
+validate_certs: true
+
+cache: true
+cache_plugin: jsonfile
+cache_connection: /tmp/librenms_inventory_cache
+cache_timeout: 600
+
+exclude_disabled: true
+exclude_ignored: true
+
+group_name_regex_filter:
+  - ^group name1$
+  - ^group name2$
+
+group_by:
+  - os
+  - type
+  - location

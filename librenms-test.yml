@@ -1,0 +1,20 @@
+plugin: librenms
+api_endpoint: http://nms.localhost/api/v0
+validate_certs: true
+
+cache: false
+cache_plugin: jsonfile
+cache_connection: /tmp/librenms_inventory_cache
+cache_timeout: 600
+
+exclude_disabled: true
+exclude_ignored: true
+
+group_name_regex_filter:
+  - ^group name1$
+  - ^group name2$
+
+group_by:
+  - os
+  - type
+  - location
