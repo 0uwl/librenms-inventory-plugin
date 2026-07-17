@@ -168,6 +168,24 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
         self.assertIn("edge-fw1", inventory.hosts)
         self.assertNotIn("édge-fw1", inventory.hosts)
 
+    def test_default_exclude_fields_strips_sensitive_snmp_data(self):
+        _, inventory = self.build_plugin()
+
+        host_vars = inventory.get_host("core-sw1").get_vars()
+        self.assertNotIn("libre_community", host_vars)
+        self.assertNotIn("libre_authpass", host_vars)
+        self.assertNotIn("libre_cryptopass", host_vars)
+        # unrelated fields must still be present
+        self.assertIn("libre_hardware", host_vars)
+
+    def test_exclude_fields_can_be_overridden_to_empty(self):
+        _, inventory = self.build_plugin(exclude_fields=[])
+
+        host_vars = inventory.get_host("core-sw1").get_vars()
+        self.assertEqual(host_vars["libre_community"], "public")
+        self.assertEqual(host_vars["libre_authpass"], "authsecret")
+        self.assertEqual(host_vars["libre_cryptopass"], "cryptosecret")
+
 
 class TestFiltering(LibrenmsInventoryTestCase):
     def test_exclude_ignored_false_includes_ignored_device(self):
@@ -316,6 +334,33 @@ class TestCaching(LibrenmsInventoryTestCase):
             )
 
             self.assertTrue(forced_call_log, "cache_force_update should bypass the cache")
+
+
+class TestApiTokenTemplating(LibrenmsInventoryTestCase):
+    # Exercises _resolve_api_token() directly rather than through a full parse(), since
+    # simulating real --extra-vars CLI plumbing (ansible.context.CLIARGS) is fragile and
+    # process-global (load_extra_vars() memoizes its result on the function object for
+    # the lifetime of the process).
+
+    def _prepare(self, api_token):
+        plugin = get_plugin_instance()
+        plugin.loader = DataLoader()
+        config_path = write_config(api_token=api_token)
+        self._configs.append(config_path)
+        plugin._read_config_data(path=config_path)
+        return plugin
+
+    def test_plain_token_passes_through_unchanged(self):
+        plugin = self._prepare("plain-token-value")
+        plugin._vars = {}
+
+        self.assertEqual(plugin._resolve_api_token(), "plain-token-value")
+
+    def test_jinja_token_is_templated_against_vars(self):
+        plugin = self._prepare("{{ my_vaulted_token }}")
+        plugin._vars = {"my_vaulted_token": "resolved-secret"}
+
+        self.assertEqual(plugin._resolve_api_token(), "resolved-secret")
 
 
 if __name__ == "__main__":

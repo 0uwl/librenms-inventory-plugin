@@ -30,7 +30,11 @@ DOCUMENTATION = r"""
             env:
                 - name: LIBRENMS_API
         api_token:
-            description: LibreNMS API token.
+            description:
+                - LibreNMS API token.
+                - Supports Jinja2 templating (eg. C({{ my_vaulted_token }})) evaluated against
+                  extra vars, so the token can be kept in an Ansible Vault-encrypted variable
+                  instead of plaintext in the inventory source file or an environment variable.
             required: true
             env:
                 - name: LIBRENMS_TOKEN
@@ -147,6 +151,20 @@ DOCUMENTATION = r"""
                 asa: asa
                 ios: ios
                 iosxe: ios
+        exclude_fields:
+            description:
+                - LibreNMS device fields to leave out of the C(libre_<field>) host vars
+                  entirely, and out of any I(variable_name_map) mapping.
+                - Defaults to fields LibreNMS returns in plaintext that many would consider
+                  secrets (SNMP community string and SNMPv3 auth/priv passphrases). These are
+                  never exposed as Ansible facts, cache entries, or C(-v) output unless you
+                  remove them from this list.
+            type: list
+            elements: str
+            default:
+                - community
+                - authpass
+                - cryptopass
 """
 
 EXAMPLES = r"""
@@ -352,9 +370,13 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
 
     def _set_host_variables(self, hostname, device):
         for field, value in device.items():
+            if field in self.exclude_fields:
+                continue
             self._require_inventory().set_variable(hostname, "libre_" + field, value)
 
         for field, mapped_name in self.variable_name_map.items():
+            if field in self.exclude_fields:
+                continue
             value = device.get(field)
             if value in (None, ""):
                 continue
@@ -442,6 +464,13 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
             self._add_host_to_composed_groups(self.get_option("groups"), device, hostname, strict=strict)
             self._add_host_to_keyed_groups(self.get_option("keyed_groups"), device, hostname, strict=strict)
 
+    def _resolve_api_token(self):
+        # Supports api_token being a Jinja2 expression (eg. "{{ vaulted_librenms_token }}")
+        # evaluated against extra vars, so the token can live in an Ansible Vault-encrypted
+        # variable instead of plaintext in the inventory source file or an env var.
+        self.templar.available_variables = self._vars
+        return self.templar.template(self.get_option("api_token"), fail_on_undefined=False)
+
     def parse(self, inventory, loader, path, cache=True):
         super(InventoryModule, self).parse(inventory, loader, path)
         self._read_config_data(path=path)
@@ -449,13 +478,14 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
         self.api_endpoint = self.get_option("api_endpoint").rstrip("/")
         self.validate_certs = self.get_option("validate_certs")
         self.timeout = self.get_option("timeout")
-        self.headers = {"X-Auth-Token": self.get_option("api_token")}
+        self.headers = {"X-Auth-Token": self._resolve_api_token()}
         self.headers.update(self.get_option("headers") or {})
 
         self.exclude_disabled = self.get_option("exclude_disabled")
         self.exclude_ignored = self.get_option("exclude_ignored")
         self.device_status_filter = self.get_option("device_status_filter")
         self.query_filters = self.get_option("query_filters")
+        self.exclude_fields = set(self.get_option("exclude_fields") or [])
 
         self.group_name_regex_filter = self.get_option("group_name_regex_filter")
         self.host_name_regex_filter = self.get_option("host_name_regex_filter")

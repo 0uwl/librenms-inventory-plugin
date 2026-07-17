@@ -1,20 +1,18 @@
 # librenms-inventory-plugin
 
 An Ansible inventory plugin for LibreNMS integration. Pulls devices from a LibreNMS
-instance and exposes them as an Ansible dynamic inventory, with grouping by LibreNMS
+instance and exposes them as an Ansible dynamic inventory, with support for grouping by LibreNMS
 device groups, by device properties (os, hardware, location, ...), and via Ansible's
 standard `compose`/`groups`/`keyed_groups` options.
 
 This started as a rewrite of
 [mschedrin/librenms-ansible-inventory-plugin](https://github.com/mschedrin/librenms-ansible-inventory-plugin),
 inspired by the design of the
-[NetBox inventory plugin](https://github.com/netbox-community/ansible_modules). See
-[plan.md](plan.md) for the design rationale.
+[NetBox inventory plugin](https://github.com/netbox-community/ansible_modules)
 
 ## Requirements
 
-- `ansible-core` (no extra Python dependencies — the plugin only uses the standard
-  library and Ansible's built-in `open_url`).
+- `ansible-core`
 - A LibreNMS instance with API access enabled and an API token.
 
 ## Installation
@@ -45,8 +43,8 @@ point:
 ```yaml
 plugin: librenms
 api_endpoint: https://librenms.example.com/api/v0
-# api_token is best provided via the LIBRENMS_TOKEN environment variable instead of
-# committing it to this file.
+# api_token is best provided via the LIBRENMS_TOKEN environment variable or through a 
+# vault variable (see example bellow) instead of committing it to this file.
 validate_certs: true
 
 cache: true
@@ -79,11 +77,70 @@ Full list of options: `ansible-doc -t inventory librenms`.
 ## Host variables
 
 Every field returned by the LibreNMS API for a device is set as a `libre_<field>`
-host var (e.g. `libre_hardware`, `libre_os`, `libre_location`). On top of that, a
-small default mapping (configurable via `variable_name_map`) sets:
+host var (e.g. `libre_hardware`, `libre_os`, `libre_location`), except for the fields
+listed in `exclude_fields` (see [Sensitive fields](#sensitive-fields) below). On top of
+that, a small default mapping (configurable via `variable_name_map`) sets:
 
 - `ansible_host` from `hostname`
 - `ansible_network_os` from `os`, translated through `os_name_map` (e.g. `iosxe` -> `ios`)
+
+## Sensitive fields
+
+LibreNMS' device API returns some fields in plaintext that most people would consider
+secrets: the SNMP community string and SNMPv3 auth/priv passphrases
+(`community`, `authpass`, `cryptopass`). These are excluded from host vars **by
+default** via the `exclude_fields` option, so they never end up as Ansible facts,
+`-v` output, or entries in the inventory cache file. If you actually need them (e.g. to
+feed a poller task), override the option:
+
+```yaml
+exclude_fields: []   # or a list with only the fields you want to keep excluded
+```
+
+Note this only controls what the plugin exposes as host vars, it can't retroactively
+secure a value that already came back from an HTTP API as plaintext JSON. Vault (below)
+encrypts values *you* control at rest in files, it has no bearing on live API responses.
+
+## Loading the API token from Ansible Vault
+
+`api_token` supports two ways to keep it out of plaintext:
+
+1. **Inline `!vault` block** in the inventory source file itself loaded through Ansible's normal
+   vault-aware YAML loader:
+
+   ```yaml
+   plugin: librenms
+   api_endpoint: https://librenms.example.com/api/v0
+   api_token: !vault |
+             $ANSIBLE_VAULT;1.1;AES256
+             6162636465...
+   ```
+
+   Generate that block with `ansible-vault encrypt_string --name api_token 'your-token'`,
+   then run with `--vault-password-file`/`ANSIBLE_VAULT_PASSWORD_FILE`/`--ask-vault-pass`.
+
+2. **Jinja2 reference to an extra var**, templated at parse time — same pattern used by
+   the NetBox inventory plugin's `token` option:
+
+   ```yaml
+   plugin: librenms
+   api_endpoint: https://librenms.example.com/api/v0
+   api_token: "{{ librenms_api_token }}"
+   ```
+
+   Note this only resolves against **extra vars** (`--extra-vars`), not
+   `group_vars`/`host_vars` — those aren't available yet while inventory sources are
+   still being parsed. To keep the value out of your shell history/CLI args, pass a
+   vault-encrypted *file* as the extra-vars source instead of a literal value:
+
+   ```
+   ansible-vault encrypt_string --name librenms_api_token 'your-token' > secrets.yml
+   ansible-inventory -i librenms.yml --list \
+     --extra-vars @secrets.yml --vault-password-file ~/.vault_pass
+   ```
+
+   `secrets.yml` can also just be `ansible-vault encrypt`-ed outright instead of using
+   an inline `!vault` string — either form works with `--extra-vars @<file>`.
 
 ## Grouping
 
