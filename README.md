@@ -25,19 +25,14 @@ enable the plugin, either via `ansible.cfg` (see `examples/ansible.cfg.example`)
 inventory_plugins = ./inventory_plugins
 
 [inventory]
-enable_plugins = librenms
-```
-
-or via environment variables:
-
-```
-export ANSIBLE_INVENTORY_PLUGINS=./inventory_plugins
-export ANSIBLE_INVENTORY_ENABLED=librenms
+# Modifying enable_plugins overrides the default list of enabled plugins so librenms is
+# appended here to the default list as per the Ansible documentation.
+enable_plugins = host_list, script, auto, yaml, ini, toml, librenms
 ```
 
 ## Configuration
 
-Create an inventory source file — see `examples/librenms.yml.dist` for a starting
+Create an inventory source file - see `examples/librenms.yml.dist` for a starting
 point:
 
 ```yaml
@@ -119,7 +114,7 @@ encrypts values *you* control at rest in files, it has no bearing on live API re
    Generate that block with `ansible-vault encrypt_string --name api_token 'your-token'`,
    then run with `--vault-password-file`/`ANSIBLE_VAULT_PASSWORD_FILE`/`--ask-vault-pass`.
 
-2. **Jinja2 reference to an extra var**, templated at parse time — same pattern used by
+2. **Jinja2 reference to an extra var**, templated at parse time - same pattern used by
    the NetBox inventory plugin's `token` option:
 
    ```yaml
@@ -129,7 +124,7 @@ encrypts values *you* control at rest in files, it has no bearing on live API re
    ```
 
    Note this only resolves against **extra vars** (`--extra-vars`), not
-   `group_vars`/`host_vars` — those aren't available yet while inventory sources are
+   `group_vars`/`host_vars` - those aren't available yet while inventory sources are
    still being parsed. To keep the value out of your shell history/CLI args, pass a
    vault-encrypted *file* as the extra-vars source instead of a literal value:
 
@@ -140,19 +135,19 @@ encrypts values *you* control at rest in files, it has no bearing on live API re
    ```
 
    `secrets.yml` can also just be `ansible-vault encrypt`-ed outright instead of using
-   an inline `!vault` string — either form works with `--extra-vars @<file>`.
+   an inline `!vault` string - either form works with `--extra-vars @<file>`.
 
 ## Grouping
 
 Three mechanisms, usable together:
 
-1. **LibreNMS device groups** — enabled by default (`device_groups_as_ansible_groups`),
+1. **LibreNMS device groups** - enabled by default (`device_groups_as_ansible_groups`),
    each device is added to an Ansible group per LibreNMS device group it belongs to.
    Restrict which device groups are considered with `group_name_regex_filter`.
-2. **`group_by`** — a curated list of device properties (`os`, `os_version`, `hardware`,
+2. **`group_by`** - a curated list of device properties (`os`, `os_version`, `hardware`,
    `type`, `status`, `location`, `vendor`, `disabled`, `ignored`). Each produces a group
    named `<property>_<value>` (or just `<value>` with `group_names_raw: true`).
-3. **`compose` / `groups` / `keyed_groups`** — Ansible's standard
+3. **`compose` / `groups` / `keyed_groups`** - Ansible's standard
    [constructed](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/constructed_inventory.html)
    options, for arbitrary Jinja2-based host vars and grouping beyond the built-in
    `group_by` choices.
@@ -160,7 +155,7 @@ Three mechanisms, usable together:
 ## Migrating from mschedrin/librenms-ansible-inventory-plugin
 
 - The plugin file now lives at `inventory_plugins/librenms.py` instead of the repo root.
-- `requests` and `unidecode` are no longer required — the plugin uses Ansible's
+- `requests` and `unidecode` are no longer required - the plugin uses Ansible's
   built-in `open_url` and the standard library.
 - The standalone `librenms-inventory-script.py` dynamic-inventory script has been
   dropped in favor of the plugin (as the old README itself recommended).
@@ -209,5 +204,5 @@ device payload, `group_by` grouping consistency, LibreNMS device-group membershi
 versions signal with an HTTP 404 rather than an empty list), and a real `ansible-inventory
 --list` subprocess run.
 
-Only use this against a disposable/test LibreNMS instance — never production, since it
+Only use this against a disposable/test LibreNMS instance - never production, since it
 requires a real API token with read access to it.

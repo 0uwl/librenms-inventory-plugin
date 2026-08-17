@@ -1,4 +1,4 @@
-# LibreNMS Ansible Inventory Plugin — Design Plan
+# LibreNMS Ansible Inventory Plugin - Design Plan
 
 ## Context
 
@@ -17,7 +17,7 @@ non-paginated API.
 
 Decisions already made:
 - **Packaging**: standalone plugin file (like the original project), not a full Galaxy collection.
-- **Dependencies**: zero extra pip dependencies — use Ansible's built-in `open_url` and stdlib `unicodedata`
+- **Dependencies**: zero extra pip dependencies - use Ansible's built-in `open_url` and stdlib `unicodedata`
   instead of `requests` + `unidecode`.
 
 ## Repo layout
@@ -62,7 +62,7 @@ for no real benefit.
 ### 1. Fetching (replaces old group→device-id→per-device-fetch chain)
 - `_fetch(url)`: wraps `ansible.module_utils.urls.open_url`, sends `X-Auth-Token` header, raises `AnsibleError`
   on `status == "error"`, with the old plugin's workaround preserved (LibreNMS returns an error payload for
-  "No devices found in group" — treat that one message as an empty result, not a failure).
+  "No devices found in group" - treat that one message as an empty result, not a failure).
 - `_get_devices()`: single `GET /devices`, optionally passing `type=` (from a new `device_status_filter` option)
   and a NetBox-style `query_filters` list of raw query-string params, letting LibreNMS filter server-side when
   possible.
@@ -75,7 +75,7 @@ for no real benefit.
   that's how the old plugin let AWX jobs force a refresh without CLI flags.
 
 ### 2. Filtering
-- `host_name_regex_filter`, `group_name_regex_filter`, `regex_ignore_case` — same names/semantics as the old
+- `host_name_regex_filter`, `group_name_regex_filter`, `regex_ignore_case` - same names/semantics as the old
   plugin (list of regexes, `re.match`), for drop-in migration.
 - `exclude_disabled` (kept) and new `exclude_ignored` (the old plugin never checked LibreNMS's `ignore` flag,
   which is distinct from `disabled`).
@@ -88,26 +88,26 @@ for no real benefit.
   instead of the fixed sysName/hostname chain.
 
 ### 4. Hostvars
-- Every raw device field is set as `libre_<field>` (unchanged — preserves existing playbooks).
+- Every raw device field is set as `libre_<field>` (unchanged - preserves existing playbooks).
 - `variable_name_map` (default: `hostname`/`libre_hostname` → `ansible_host`, `os`/`libre_os` →
-  `ansible_network_os`) — kept from old plugin but exposed as a configurable dict option instead of a hardcoded
+  `ansible_network_os`) - kept from old plugin but exposed as a configurable dict option instead of a hardcoded
   constant.
-- `os_name_map` (default: `{asa: asa, ios: ios, iosxe: ios}`) — same idea, now user-configurable since
+- `os_name_map` (default: `{asa: asa, ios: ios, iosxe: ios}`) - same idea, now user-configurable since
   `ansible_network_os` naming depends on which collections the user has installed.
 
-### 5. Grouping — the main new feature
+### 5. Grouping - the main new feature
 Three complementary mechanisms, all additive to existing behavior:
 1. **LibreNMS device groups as Ansible groups** (old behavior, kept as default): controlled by a new
    `device_groups_as_ansible_groups` bool (default `true`), using the membership map from step 1.
 2. **`group_by` extractor list** (new, modeled directly on `nb_inventory.py`'s `group_extractors` property +
    `generate_group_name`): a `group_extractors` dict property mapping option names to small `extract_*(device)`
-   methods — e.g. `os`, `hardware`, `type`, `status`, `location`, `vendor`, `version` (`os_version`), `disabled`,
+   methods - e.g. `os`, `hardware`, `type`, `status`, `location`, `vendor`, `version` (`os_version`), `disabled`,
    `ignored`. `generate_group_name(grouping, value)` produces `f"{grouping}_{value}"` (sanitized), with the same
    boolean special-case NetBox uses (a true boolean produces a group named after the grouping itself, e.g.
    `disabled`, not `disabled_True`; false produces no group).
 3. **Ansible `Constructable`** (`extends_documentation_fragment: constructed`): wire up `self._set_composite_vars`
    (`compose`), `self._add_host_to_composed_groups` (`groups`), `self._add_host_to_keyed_groups` (`keyed_groups`)
-   in the per-host loop, exactly as `nb_inventory.py` does — this is the direct answer to the old plugin's own
+   in the per-host loop, exactly as `nb_inventory.py` does - this is the direct answer to the old plugin's own
    TODO comment and gives power users arbitrary Jinja2-based grouping without waiting on new `group_by` choices.
 
 ### 6. `parse()` flow
@@ -132,7 +132,7 @@ parse() -> read all options into self.* -> main():
   (case-sensitive/insensitive), `exclude_disabled`/`exclude_ignored`, hostname unicode normalization, and cache
   hit/bypass/`cache_force_update` behavior.
 - Manual end-to-end verification: `ansible-inventory -i inventory_plugins/librenms.yml --list -vvv` against a
-  real/test LibreNMS instance the user points `LIBRENMS_API`/`LIBRENMS_TOKEN` at — this requires the user's own
+  real/test LibreNMS instance the user points `LIBRENMS_API`/`LIBRENMS_TOKEN` at - this requires the user's own
   instance/credentials and can't be done from here.
 
 ## README updates

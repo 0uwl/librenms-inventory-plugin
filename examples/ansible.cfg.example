@@ -2,4 +2,6 @@
 inventory_plugins = ./inventory_plugins
 
 [inventory]
-enable_plugins = librenms
+# Modifying enable_plugins overrides the default list of enabled plugins so librenms is
+# appended here to the default list as per the Ansible documentation.
+enable_plugins = host_list, script, auto, yaml, ini, toml, librenms
