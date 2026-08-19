@@ -184,7 +184,7 @@ same option-parsing and grouping code paths as a real `ansible-inventory` run.
 mocked responses. It's skipped automatically unless credentials are available, so it
 never runs as part of a normal offline `tests/unit` run.
 
-Provide credentials either as real environment variables, or via a gitignored `env`
+Provide credentials either as real environment variables, or via a gitignored `.env`
 file at the repo root:
 
 ```

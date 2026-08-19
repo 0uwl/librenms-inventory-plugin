@@ -1,0 +1,22 @@
+{
+    "status": "ok",
+    "count": 2,
+    "devices": [
+        {
+            "device_id": 10,
+            "hostname": "hostname-only.example.com",
+            "sysName": "",
+            "os": "linux",
+            "disabled": 0,
+            "ignore": 0
+        },
+        {
+            "device_id": 11,
+            "hostname": "",
+            "sysName": "",
+            "os": "linux",
+            "disabled": 0,
+            "ignore": 0
+        }
+    ]
+}

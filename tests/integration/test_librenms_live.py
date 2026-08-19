@@ -2,7 +2,7 @@
 instance rather than mocked HTTP responses (see tests/unit/ for those).
 
 Skipped automatically unless LIBRENMS_API and LIBRENMS_TOKEN are available - either
-already exported, or provided via a gitignored `env` file (KEY=VALUE per line) at the
+already exported, or provided via a gitignored `.env` file (KEY=VALUE per line) at the
 repo root. Nothing here assumes specific fixture data: every assertion is checked
 against a live "ground truth" fetched directly from the same API, so the suite keeps
 working as the target instance's devices/groups change.
@@ -27,7 +27,7 @@ from ansible.plugins.loader import inventory_loader
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 PLUGIN_DIR = os.path.join(REPO_ROOT, "inventory_plugins")
-ENV_FILE = os.path.join(REPO_ROOT, "env")
+ENV_FILE = os.path.join(REPO_ROOT, ".env")
 
 
 def _load_env_file(path):

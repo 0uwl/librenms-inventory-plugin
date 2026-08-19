@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 import urllib.error
+import uuid
 from unittest import mock
 
 from ansible.errors import AnsibleError
@@ -50,6 +51,17 @@ class FakeResponse:
         return self._body
 
 
+class RawResponse:
+    """Route marker: respond with an arbitrary byte string instead of a JSON-encoded
+    fixture, so tests can simulate a 200 OK with a non-JSON or non-UTF-8 body."""
+
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+
 class HttpErrorRoute:
     """Route marker: respond with a raised HTTPError instead of a 200 body, so tests can
     simulate LibreNMS returning a non-2xx status (eg. 404) for "nothing found" cases."""
@@ -67,17 +79,21 @@ class HttpErrorRoute:
         raise urllib.error.HTTPError(url, self.status, "Error", {}, io.BytesIO(body))
 
 
-def make_open_url(routes=None, call_log=None):
+def make_open_url(routes=None, call_log=None, request_log=None):
     routes = routes or DEFAULT_ROUTES
 
     def _open_url(url, headers=None, timeout=None, validate_certs=None):
         if call_log is not None:
             call_log.append(url)
+        if request_log is not None:
+            request_log.append({"url": url, "headers": headers, "timeout": timeout})
         for suffix in sorted(routes, key=len, reverse=True):
             if url.endswith(suffix) or suffix in url:
                 route = routes[suffix]
                 if isinstance(route, HttpErrorRoute):
                     route.raise_for(url)
+                if isinstance(route, RawResponse):
+                    return route
                 return FakeResponse(load_fixture(route))
         raise AssertionError("Unexpected URL requested: {0}".format(url))
 
@@ -118,7 +134,7 @@ class LibrenmsInventoryTestCase(unittest.TestCase):
             except OSError:
                 pass
 
-    def build_plugin(self, routes=None, call_log=None, **config_overrides):
+    def build_plugin(self, routes=None, call_log=None, request_log=None, **config_overrides):
         config_path = write_config(**config_overrides)
         self._configs.append(config_path)
 
@@ -127,7 +143,7 @@ class LibrenmsInventoryTestCase(unittest.TestCase):
         inventory = InventoryData()
         loader = DataLoader()
 
-        with mock.patch(modname + ".open_url", make_open_url(routes, call_log)):
+        with mock.patch(modname + ".open_url", make_open_url(routes, call_log, request_log)):
             plugin.parse(inventory, loader, config_path, cache=True)
             if plugin.get_option("cache"):
                 # Normally done by InventoryManager after parse() returns; replicate it
@@ -316,6 +332,124 @@ class TestApiTokenTemplating(LibrenmsInventoryTestCase):
         plugin._vars = {"my_vaulted_token": "resolved-secret"}
 
         self.assertEqual(plugin._resolve_api_token(), "resolved-secret")
+
+
+class TestIsFlagSet(unittest.TestCase):
+    def test_none_is_not_set(self):
+        self.assertFalse(get_plugin_instance()._is_flag_set(None))
+
+    def test_zero_and_empty_string_are_not_set(self):
+        plugin = get_plugin_instance()
+        self.assertFalse(plugin._is_flag_set("0"))
+        self.assertFalse(plugin._is_flag_set(""))
+
+    def test_one_is_set(self):
+        plugin = get_plugin_instance()
+        self.assertTrue(plugin._is_flag_set("1"))
+        self.assertTrue(plugin._is_flag_set(1))
+
+
+class TestDeviceQueryParams(LibrenmsInventoryTestCase):
+    def test_device_status_filter_adds_type_query_param(self):
+        call_log = []
+        self.build_plugin(call_log=call_log, device_status_filter="up")
+
+        devices_calls = [u for u in call_log if "/devices" in u and "/devicegroups" not in u]
+        self.assertTrue(any(u.endswith("/devices?type=up") for u in devices_calls), devices_calls)
+
+    def test_device_status_filter_all_omits_query_param(self):
+        call_log = []
+        self.build_plugin(call_log=call_log, device_status_filter="all")
+
+        devices_calls = [u for u in call_log if "/devices" in u and "/devicegroups" not in u]
+        self.assertTrue(any(u.endswith("/devices") for u in devices_calls), devices_calls)
+        self.assertFalse(any("type=" in u for u in devices_calls), devices_calls)
+
+    def test_query_filters_appended_to_devices_url(self):
+        call_log = []
+        self.build_plugin(call_log=call_log, query_filters=["os=ios"])
+
+        devices_calls = [u for u in call_log if "/devices" in u and "/devicegroups" not in u]
+        self.assertTrue(any("os=ios" in u for u in devices_calls), devices_calls)
+
+    def test_device_status_filter_and_query_filters_combine(self):
+        call_log = []
+        self.build_plugin(call_log=call_log, device_status_filter="up", query_filters=["os=ios"])
+
+        devices_calls = [u for u in call_log if "/devices" in u and "/devicegroups" not in u]
+        self.assertTrue(
+            any(u.endswith("/devices?type=up&os=ios") for u in devices_calls), devices_calls
+        )
+
+
+class TestResponseParsingErrors(LibrenmsInventoryTestCase):
+    def test_non_json_200_response_raises(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = RawResponse(b"<html>not json</html>")
+
+        with self.assertRaises(AnsibleError):
+            self.build_plugin(routes=routes)
+
+
+class TestHostnameDerivation(LibrenmsInventoryTestCase):
+    def test_hostname_field_option_selects_custom_field(self):
+        _, inventory = self.build_plugin(hostname_field="serial")
+
+        self.assertIn("ABC123", inventory.hosts)
+        self.assertIn("ABC124", inventory.hosts)
+
+    def test_hostname_field_falls_back_to_uuid_when_empty(self):
+        _, inventory = self.build_plugin(
+            hostname_field="purpose",
+            exclude_disabled=False,
+            exclude_ignored=False,
+            host_name_regex_filter=["^old-switch$"],
+        )
+
+        self.assertEqual(len(inventory.hosts), 1)
+        (hostname,) = inventory.hosts.keys()
+        self.assertNotEqual(hostname, "")
+        uuid.UUID(hostname)  # raises ValueError if not a valid uuid string
+
+    def test_falls_back_to_hostname_when_sysname_missing(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_hostname_fallback.json"
+
+        _, inventory = self.build_plugin(routes=routes, device_groups_as_ansible_groups=False)
+
+        self.assertIn("hostname-only.example.com", inventory.hosts)
+
+    def test_falls_back_to_uuid_when_sysname_and_hostname_missing(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_hostname_fallback.json"
+
+        _, inventory = self.build_plugin(routes=routes, device_groups_as_ansible_groups=False)
+
+        other_host = "hostname-only.example.com"
+        (fallback_host,) = [h for h in inventory.hosts if h != other_host]
+        uuid.UUID(fallback_host)  # raises ValueError if not a valid uuid string
+
+
+class TestGroupingToggle(LibrenmsInventoryTestCase):
+    def test_disabling_device_groups_skips_devicegroups_endpoint(self):
+        call_log = []
+        _, inventory = self.build_plugin(call_log=call_log, device_groups_as_ansible_groups=False)
+
+        self.assertFalse(any("/devicegroups" in u for u in call_log), call_log)
+        self.assertEqual(set(inventory.groups.keys()), {"all", "ungrouped"})
+
+
+class TestRequestConstruction(LibrenmsInventoryTestCase):
+    def test_custom_headers_are_merged_with_auth_token(self):
+        request_log = []
+        self.build_plugin(request_log=request_log, headers={"X-Extra": "value"}, timeout=45)
+
+        devices_requests = [r for r in request_log if r["url"].endswith("/devices")]
+        self.assertTrue(devices_requests)
+        headers = devices_requests[0]["headers"]
+        self.assertEqual(headers["X-Auth-Token"], "test-token")
+        self.assertEqual(headers["X-Extra"], "value")
+        self.assertEqual(devices_requests[0]["timeout"], 45)
 
 
 if __name__ == "__main__":
