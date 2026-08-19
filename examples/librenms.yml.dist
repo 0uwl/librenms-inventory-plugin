@@ -15,8 +15,3 @@ exclude_ignored: true
 group_name_regex_filter:
   - ^group name1$
   - ^group name2$
-
-group_by:
-  - os
-  - type
-  - location

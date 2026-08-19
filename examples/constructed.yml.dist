@@ -1,0 +1,21 @@
+# Example second inventory source, chained after librenms.yml, using Ansible's builtin
+# `constructed` plugin for property-based grouping and composed vars over the
+# `libre_<field>` host vars librenms.yml already set.
+#
+# Run both together, e.g.: ansible-inventory -v --list -i librenms.yml -i constructed.yml
+# `constructed` must be enabled in ansible.cfg's [inventory] enable_plugins - see
+# examples/ansible.cfg.example.
+plugin: constructed
+
+compose:
+  ansible_host: libre_hostname
+  ansible_network_os: "{'iosxe': 'ios'}.get(libre_os, libre_os)"
+
+groups:
+  network_edge: "'router' in libre_purpose | default('')"
+
+keyed_groups:
+  - prefix: os
+    key: libre_os
+  - prefix: location
+    key: libre_location

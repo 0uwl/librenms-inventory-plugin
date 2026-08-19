@@ -145,22 +145,12 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
         # device 3 (disabled) and device 4 (ignored) must be excluded by default
         self.assertEqual(hosts, {"core-sw1", "core-sw2"})
 
-    def test_libre_prefixed_vars_and_mapped_vars_are_set(self):
+    def test_libre_prefixed_vars_are_set(self):
         _, inventory = self.build_plugin()
 
         host_vars = inventory.get_host("core-sw1").get_vars()
         self.assertEqual(host_vars["libre_hardware"], "C9300")
         self.assertEqual(host_vars["libre_hostname"], "core-sw1.example.com")
-        self.assertEqual(host_vars["ansible_host"], "core-sw1.example.com")
-        # os "ios" maps to network_os "ios" via the default os_name_map
-        self.assertEqual(host_vars["ansible_network_os"], "ios")
-
-    def test_iosxe_is_translated_to_ios_network_os(self):
-        _, inventory = self.build_plugin()
-
-        host_vars = inventory.get_host("core-sw2").get_vars()
-        self.assertEqual(host_vars["libre_os"], "iosxe")
-        self.assertEqual(host_vars["ansible_network_os"], "ios")
 
     def test_unicode_hostname_is_ascii_normalized(self):
         _, inventory = self.build_plugin(exclude_disabled=False)
@@ -204,31 +194,6 @@ class TestFiltering(LibrenmsInventoryTestCase):
 
 
 class TestGrouping(LibrenmsInventoryTestCase):
-    def test_group_by_string_property(self):
-        _, inventory = self.build_plugin(group_by=["os", "location"])
-
-        os_ios_hosts = {h.name for h in inventory.groups["os_ios"].get_hosts()}
-        self.assertEqual(os_ios_hosts, {"core-sw1"})
-
-        location_hosts = {h.name for h in inventory.groups["location_DC1"].get_hosts()}
-        self.assertEqual(location_hosts, {"core-sw1", "core-sw2"})
-
-    def test_group_by_boolean_property_only_creates_true_group(self):
-        _, inventory = self.build_plugin(
-            exclude_disabled=False, exclude_ignored=False, group_by=["disabled", "ignored"]
-        )
-
-        self.assertIn("disabled", inventory.groups)
-        self.assertIn("ignored", inventory.groups)
-        disabled_hosts = {h.name for h in inventory.groups["disabled"].get_hosts()}
-        self.assertEqual(disabled_hosts, {"edge-fw1"})
-
-    def test_group_names_raw_drops_prefix(self):
-        _, inventory = self.build_plugin(group_by=["os"], group_names_raw=True)
-
-        self.assertIn("ios", inventory.groups)
-        self.assertNotIn("os_ios", inventory.groups)
-
     def test_device_group_membership_respects_regex_filter(self):
         call_log = []
         _, inventory = self.build_plugin(
@@ -277,16 +242,6 @@ class TestGrouping(LibrenmsInventoryTestCase):
 
         with self.assertRaises(AnsibleError):
             self.build_plugin(routes=routes, group_name_regex_filter=["^Core$", "^Edge$"])
-
-    def test_constructed_compose_and_keyed_groups(self):
-        _, inventory = self.build_plugin(
-            compose={"libre_env": "'prod'"},
-            keyed_groups=[{"prefix": "type", "key": "libre_type"}],
-        )
-
-        host_vars = inventory.get_host("core-sw1").get_vars()
-        self.assertEqual(host_vars["libre_env"], "prod")
-        self.assertIn("type_network", inventory.groups)
 
 
 class TestCaching(LibrenmsInventoryTestCase):

@@ -1,9 +1,10 @@
 # librenms-inventory-plugin
 
 An Ansible inventory plugin for LibreNMS integration. Pulls devices from a LibreNMS
-instance and exposes them as an Ansible dynamic inventory, with support for grouping by LibreNMS
-device groups, by device properties (os, hardware, location, ...), and via Ansible's
-standard `compose`/`groups`/`keyed_groups` options.
+instance and exposes them as an Ansible dynamic inventory, with support for grouping by
+LibreNMS device groups. Every device field is exposed as a `libre_<field>` host var, so
+property-based grouping or composed vars are left to Ansible's standard `constructed`
+inventory plugin, chained as a second inventory source - see [Grouping](#grouping).
 
 This started as a rewrite of
 [mschedrin/librenms-ansible-inventory-plugin](https://github.com/mschedrin/librenms-ansible-inventory-plugin),
@@ -53,11 +54,6 @@ exclude_ignored: true
 group_name_regex_filter:
   - ^Core$
   - ^Edge$
-
-group_by:
-  - os
-  - type
-  - location
 ```
 
 Export your API token and test it:
@@ -73,11 +69,11 @@ Full list of options: `ansible-doc -t inventory librenms`.
 
 Every field returned by the LibreNMS API for a device is set as a `libre_<field>`
 host var (e.g. `libre_hardware`, `libre_os`, `libre_location`), except for the fields
-listed in `exclude_fields` (see [Sensitive fields](#sensitive-fields) below). On top of
-that, a small default mapping (configurable via `variable_name_map`) sets:
+listed in `exclude_fields` (see [Sensitive fields](#sensitive-fields) below).
 
-- `ansible_host` from `hostname`
-- `ansible_network_os` from `os`, translated through `os_name_map` (e.g. `iosxe` -> `ios`)
+Anything derived from those fields - e.g. `ansible_host` from `libre_hostname`, or
+`ansible_network_os` translated from `libre_os` (`iosxe` -> `ios`) - is left to a chained
+`constructed` inventory source's `compose` option; see [Grouping](#grouping).
 
 ## Sensitive fields
 
@@ -139,18 +135,24 @@ encrypts values *you* control at rest in files, it has no bearing on live API re
 
 ## Grouping
 
-Three mechanisms, usable together:
+This plugin only groups by **LibreNMS device groups** - enabled by default
+(`device_groups_as_ansible_groups`), each device is added to an Ansible group per
+LibreNMS device group it belongs to. Restrict which device groups are considered with
+`group_name_regex_filter`.
 
-1. **LibreNMS device groups** - enabled by default (`device_groups_as_ansible_groups`),
-   each device is added to an Ansible group per LibreNMS device group it belongs to.
-   Restrict which device groups are considered with `group_name_regex_filter`.
-2. **`group_by`** - a curated list of device properties (`os`, `os_version`, `hardware`,
-   `type`, `status`, `location`, `vendor`, `disabled`, `ignored`). Each produces a group
-   named `<property>_<value>` (or just `<value>` with `group_names_raw: true`).
-3. **`compose` / `groups` / `keyed_groups`** - Ansible's standard
-   [constructed](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/constructed_inventory.html)
-   options, for arbitrary Jinja2-based host vars and grouping beyond the built-in
-   `group_by` choices.
+For anything else - grouping by device property (os, location, ...), composed vars
+(`ansible_host`, `ansible_network_os`, ...), or arbitrary Jinja2-based conditions - chain
+Ansible's builtin
+[constructed](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/constructed_inventory.html)
+inventory plugin as a **second inventory source** over this one's output, using its
+`compose`/`groups`/`keyed_groups` options against the `libre_<field>` host vars this
+plugin sets. `constructed` isn't enabled by default, so add it to `enable_plugins`
+alongside `librenms` (see `examples/ansible.cfg.example`). See
+`examples/constructed.yml.dist` for a starting point, and run both sources together:
+
+```
+ansible-inventory -v --list -i librenms.yml -i constructed.yml
+```
 
 ## Migrating from mschedrin/librenms-ansible-inventory-plugin
 
@@ -161,9 +163,10 @@ Three mechanisms, usable together:
   dropped in favor of the plugin (as the old README itself recommended).
 - `host_name_regex_filter`, `group_name_regex_filter`, `regex_ignore_case`,
   `exclude_disabled`, and `cache_force_update` keep the same names and behavior.
-- New: `exclude_ignored`, `hostname_field`, `device_status_filter`, `query_filters`,
-  `group_by`, `group_names_raw`, `variable_name_map`, `os_name_map`, and the standard
-  `compose`/`groups`/`keyed_groups` options.
+- New: `exclude_ignored`, `hostname_field`, `device_status_filter`, `query_filters`.
+- Property-based grouping and vars like `ansible_host`/`ansible_network_os` are no
+  longer built into this plugin - chain Ansible's standard `constructed` inventory
+  plugin as a second source instead (see [Grouping](#grouping)).
 
 ## Testing
 
@@ -199,7 +202,7 @@ Every assertion is checked against a "ground truth" fetched directly from the sa
 at test time (not hardcoded fixture values), so the suite keeps working as the target
 instance's devices/groups change. It covers: default `exclude_disabled`/`exclude_ignored`
 filtering against the real `disabled`/`ignore` flags, `libre_*` hostvars matching the raw
-device payload, `group_by` grouping consistency, LibreNMS device-group membership
+device payload, LibreNMS device-group membership
 (including the case where an instance has zero device groups, which some LibreNMS
 versions signal with an HTTP 404 rather than an empty list), and a real `ansible-inventory
 --list` subprocess run.

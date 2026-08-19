@@ -3,5 +3,8 @@ inventory_plugins = ./inventory_plugins
 
 [inventory]
 # Modifying enable_plugins overrides the default list of enabled plugins so librenms is
-# appended here to the default list as per the Ansible documentation.
-enable_plugins = host_list, script, auto, yaml, ini, toml, librenms
+# appended here to the default list as per the Ansible documentation. `constructed` (an
+# ansible-core builtin, no inventory_plugins path needed) is also enabled here so it can
+# be chained as a second inventory source for property-based grouping/composed vars on
+# top of librenms - see the README's Grouping section. Drop it if you don't need that.
+enable_plugins = host_list, script, auto, yaml, ini, toml, librenms, constructed

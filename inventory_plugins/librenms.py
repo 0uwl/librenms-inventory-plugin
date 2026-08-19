@@ -13,11 +13,10 @@ DOCUMENTATION = r"""
     description:
         - Get inventory hosts from a LibreNMS instance.
         - Every device field is exposed as a C(libre_<field>) host var.
-        - Devices can be grouped by LibreNMS device group membership and/or by device
-          properties (os, hardware, location, ...), and further refined with Ansible's
-          standard C(compose)/C(groups)/C(keyed_groups) options.
+        - Devices can be grouped by LibreNMS device group membership. For property-based
+          grouping or composed vars, chain Ansible's standard C(constructed) inventory
+          plugin as a second inventory source over this one's output.
     extends_documentation_fragment:
-        - constructed
         - inventory_cache
     options:
         plugin:
@@ -111,50 +110,10 @@ DOCUMENTATION = r"""
                   (subject to I(group_name_regex_filter)).
             type: bool
             default: true
-        group_by:
-            description:
-                - List of device properties to group hosts by. For each device, a group named
-                  C(<property>_<value>) (or just C(<value>) if I(group_names_raw) is set) is
-                  created and the host is added to it.
-            type: list
-            elements: str
-            choices:
-                - os
-                - os_version
-                - hardware
-                - type
-                - status
-                - location
-                - vendor
-                - disabled
-                - ignored
-            default: []
-        group_names_raw:
-            description: Do not prefix I(group_by) group names with the property name.
-            type: bool
-            default: false
-        variable_name_map:
-            description:
-                - Mapping of raw LibreNMS device field names to the additional host var name
-                  they should be exposed as, on top of the always-present C(libre_<field>).
-            type: dict
-            default:
-                hostname: ansible_host
-                os: ansible_network_os
-        os_name_map:
-            description:
-                - Mapping applied to the value written to C(ansible_network_os), translating
-                  LibreNMS' C(os) field into the network_os value expected by installed
-                  collections (e.g. C(iosxe) -> C(ios)).
-            type: dict
-            default:
-                asa: asa
-                ios: ios
-                iosxe: ios
         exclude_fields:
             description:
                 - LibreNMS device fields to leave out of the C(libre_<field>) host vars
-                  entirely, and out of any I(variable_name_map) mapping.
+                  entirely.
                 - Defaults to fields LibreNMS returns in plaintext that many would consider
                   secrets (SNMP community string and SNMPv3 auth/priv passphrases). These are
                   never exposed as Ansible facts, cache entries, or C(-v) output unless you
@@ -185,22 +144,9 @@ group_name_regex_filter:
   - ^Network Core$
   - ^Site .*$
 
-group_by:
-  - os
-  - type
-  - location
-
-# Power-user grouping/vars on top of the built-in group_by choices, using Ansible's
-# standard Constructable options:
-compose:
-  ansible_port: libre_ssh_port | default(22)
-
-groups:
-  network_edge: "'router' in libre_purpose | default('')"
-
-keyed_groups:
-  - prefix: vendor
-    key: libre_vendor
+# For property-based grouping (os, location, ...) or composed vars (eg. ansible_host,
+# ansible_network_os), add a second inventory source using Ansible's standard
+# `constructed` plugin over this one's output - see the README's Grouping section.
 """
 
 import json
@@ -213,10 +159,10 @@ from collections import defaultdict
 from ansible.errors import AnsibleError
 from ansible.module_utils.common.text.converters import to_text
 from ansible.module_utils.urls import open_url
-from ansible.plugins.inventory import BaseInventoryPlugin, Cacheable, Constructable
+from ansible.plugins.inventory import BaseInventoryPlugin, Cacheable
 
 
-class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
+class InventoryModule(BaseInventoryPlugin, Cacheable):
     NAME = "librenms"
 
     def _require_inventory(self):
@@ -374,62 +320,7 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
                 continue
             self._require_inventory().set_variable(hostname, "libre_" + field, value)
 
-        for field, mapped_name in self.variable_name_map.items():
-            if field in self.exclude_fields:
-                continue
-            value = device.get(field)
-            if value in (None, ""):
-                continue
-            if mapped_name == "ansible_network_os":
-                value = self.os_name_map.get(value, value)
-            self._require_inventory().set_variable(hostname, mapped_name, value)
-
     # --- Grouping -----------------------------------------------------
-
-    @property
-    def group_extractors(self):
-        return {
-            "os": lambda device: device.get("os"),
-            "os_version": lambda device: device.get("os_version"),
-            "hardware": lambda device: device.get("hardware"),
-            "type": lambda device: device.get("type"),
-            "status": lambda device: "up" if self._is_flag_set(device.get("status")) else "down",
-            "location": lambda device: device.get("location"),
-            "vendor": lambda device: device.get("vendor"),
-            "disabled": lambda device: self._is_flag_set(device.get("disabled")),
-            "ignored": lambda device: self._is_flag_set(device.get("ignore")),
-        }
-
-    def generate_group_name(self, grouping, value):
-        # Booleans are special-cased so eg. "disabled" produces a group named "disabled",
-        # not "disabled_True", and "False" produces no group at all.
-        if isinstance(value, bool):
-            return grouping if value else None
-
-        if value in (None, ""):
-            return None
-
-        sanitized = re.sub(r"\W+", "_", str(value)).strip("_")
-        if not sanitized:
-            return None
-
-        if self.group_names_raw:
-            return sanitized
-        return "{0}_{1}".format(grouping, sanitized)
-
-    def _add_host_to_property_groups(self, device, hostname):
-        for grouping in self.group_by:
-            extractor = self.group_extractors.get(grouping)
-            if extractor is None:
-                continue
-
-            value = extractor(device)
-            group_name = self.generate_group_name(grouping, value)
-            if not group_name:
-                continue
-
-            transformed_group_name = self._require_inventory().add_group(group_name)
-            self._require_inventory().add_host(group=transformed_group_name, host=hostname)
 
     def _add_host_to_device_groups(self, device_id, hostname, membership):
         for group_name in membership.get(device_id, []):
@@ -445,8 +336,6 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
         if self.device_groups_as_ansible_groups:
             membership = self._get_device_group_membership()
 
-        strict = self.get_option("strict")
-
         for device in devices:
             if self._device_excluded(device):
                 continue
@@ -457,12 +346,6 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
 
             if self.device_groups_as_ansible_groups:
                 self._add_host_to_device_groups(device.get("device_id"), hostname, membership)
-
-            self._add_host_to_property_groups(device, hostname)
-
-            self._set_composite_vars(self.get_option("compose"), device, hostname, strict=strict)
-            self._add_host_to_composed_groups(self.get_option("groups"), device, hostname, strict=strict)
-            self._add_host_to_keyed_groups(self.get_option("keyed_groups"), device, hostname, strict=strict)
 
     def _resolve_api_token(self):
         # Supports api_token being a Jinja2 expression (eg. "{{ vaulted_librenms_token }}")
@@ -493,10 +376,6 @@ class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable):
 
         self.hostname_field = self.get_option("hostname_field")
         self.device_groups_as_ansible_groups = self.get_option("device_groups_as_ansible_groups")
-        self.group_by = self.get_option("group_by")
-        self.group_names_raw = self.get_option("group_names_raw")
-        self.variable_name_map = self.get_option("variable_name_map")
-        self.os_name_map = self.get_option("os_name_map")
 
         self.cache_force_update = self.get_option("cache_force_update")
         self.use_cache = cache

@@ -57,7 +57,7 @@ for no real benefit.
 
 ## Core architecture (`inventory_plugins/librenms.py`)
 
-`class InventoryModule(BaseInventoryPlugin, Constructable, Cacheable)`, `NAME = 'librenms'`.
+`class InventoryModule(BaseInventoryPlugin, Cacheable)`, `NAME = 'librenms'`.
 
 ### 1. Fetching (replaces old group→device-id→per-device-fetch chain)
 - `_fetch(url)`: wraps `ansible.module_utils.urls.open_url`, sends `X-Auth-Token` header, raises `AnsibleError`
@@ -89,26 +89,20 @@ for no real benefit.
 
 ### 4. Hostvars
 - Every raw device field is set as `libre_<field>` (unchanged - preserves existing playbooks).
-- `variable_name_map` (default: `hostname`/`libre_hostname` → `ansible_host`, `os`/`libre_os` →
-  `ansible_network_os`) - kept from old plugin but exposed as a configurable dict option instead of a hardcoded
-  constant.
-- `os_name_map` (default: `{asa: asa, ios: ios, iosxe: ios}`) - same idea, now user-configurable since
-  `ansible_network_os` naming depends on which collections the user has installed.
+- No built-in var-mapping/translation (eg. `ansible_host`, `ansible_network_os`) - see below.
 
-### 5. Grouping - the main new feature
-Three complementary mechanisms, all additive to existing behavior:
-1. **LibreNMS device groups as Ansible groups** (old behavior, kept as default): controlled by a new
-   `device_groups_as_ansible_groups` bool (default `true`), using the membership map from step 1.
-2. **`group_by` extractor list** (new, modeled directly on `nb_inventory.py`'s `group_extractors` property +
-   `generate_group_name`): a `group_extractors` dict property mapping option names to small `extract_*(device)`
-   methods - e.g. `os`, `hardware`, `type`, `status`, `location`, `vendor`, `version` (`os_version`), `disabled`,
-   `ignored`. `generate_group_name(grouping, value)` produces `f"{grouping}_{value}"` (sanitized), with the same
-   boolean special-case NetBox uses (a true boolean produces a group named after the grouping itself, e.g.
-   `disabled`, not `disabled_True`; false produces no group).
-3. **Ansible `Constructable`** (`extends_documentation_fragment: constructed`): wire up `self._set_composite_vars`
-   (`compose`), `self._add_host_to_composed_groups` (`groups`), `self._add_host_to_keyed_groups` (`keyed_groups`)
-   in the per-host loop, exactly as `nb_inventory.py` does - this is the direct answer to the old plugin's own
-   TODO comment and gives power users arbitrary Jinja2-based grouping without waiting on new `group_by` choices.
+### 5. Grouping
+Only **LibreNMS device groups as Ansible groups** (old behavior, kept as default): controlled by a
+`device_groups_as_ansible_groups` bool (default `true`), using the membership map from step 1.
+
+An earlier revision of this plugin also shipped a `group_by` property-extractor list
+(`nb_inventory.py`-style) and mixed in Ansible's `Constructable` directly to wire up its own
+`compose`/`groups`/`keyed_groups`. Both were dropped: every device field is already exposed as a
+`libre_<field>` host var, so that functionality is exactly what Ansible's standalone `constructed`
+inventory plugin already does as a **second inventory source** chained after this one - reimplementing
+it here was pure duplication. Users who want property-based grouping or composed vars enable
+`constructed` in `enable_plugins` (it isn't on by default) and point it at the `libre_<field>` vars;
+see `examples/constructed.yml.dist` and the README's Grouping section.
 
 ### 6. `parse()` flow
 ```
@@ -119,16 +113,14 @@ parse() -> read all options into self.* -> main():
       apply host_name_regex_filter / exclude_disabled / exclude_ignored -> skip if filtered
       hostname = derive_hostname(device)
       inventory.add_host(hostname)
-      set libre_* hostvars + mapped vars
+      set libre_* hostvars
       if device_groups_as_ansible_groups: add to membership[device_id] groups
-      add_host_to_groups(device, hostname)        # group_by extractors
-      _set_composite_vars / _add_host_to_composed_groups / _add_host_to_keyed_groups
 ```
 
 ## Testing strategy
 - Unit tests (`tests/unit/test_librenms_inventory.py`) using `unittest.mock` to stub `open_url`, with JSON
   fixtures under `tests/unit/fixtures/` modeled on the LibreNMS API doc examples (`devices.json`,
-  `devicegroups.json`, `devicegroups_<name>.json`). Cover: basic parse, each `group_by` extractor, regex filters
+  `devicegroups.json`, `devicegroups_<name>.json`). Cover: basic parse, regex filters
   (case-sensitive/insensitive), `exclude_disabled`/`exclude_ignored`, hostname unicode normalization, and cache
   hit/bypass/`cache_force_update` behavior.
 - Manual end-to-end verification: `ansible-inventory -i inventory_plugins/librenms.yml --list -vvv` against a
@@ -138,5 +130,5 @@ parse() -> read all options into self.* -> main():
 ## README updates
 - Install/config instructions (same shape as old README: `ansible.cfg` `inventory_plugins` path, `enable_plugins`).
 - Migration notes for old-plugin users: file moved to `inventory_plugins/librenms.py`, `requests`/`unidecode` no
-  longer needed, standalone script removed, new `group_by`/`compose`/`groups`/`keyed_groups`/`exclude_ignored`
-  options documented with examples.
+  longer needed, standalone script removed, new `exclude_ignored`/`hostname_field`/`device_status_filter`/
+  `query_filters` options documented, plus chaining `constructed` for property-based grouping/composed vars.

@@ -160,30 +160,9 @@ class TestLiveDevices(LiveLibrenmsTestCase):
 
         self.assertEqual(host_vars["libre_hostname"], sample["hostname"])
         self.assertEqual(host_vars["libre_os"], sample["os"])
-        self.assertEqual(host_vars["ansible_host"], sample["hostname"])
 
 
 class TestLiveGrouping(LiveLibrenmsTestCase):
-    def test_group_by_os_and_status_is_internally_consistent(self):
-        _, inventory = self.build_plugin(
-            exclude_disabled=False, exclude_ignored=False, group_by=["os", "status"]
-        )
-
-        for group_name, group in inventory.groups.items():
-            if group_name.startswith("os_"):
-                expected_os = group_name[len("os_"):]
-                for host in group.get_hosts():
-                    self.assertEqual(host.get_vars().get("libre_os"), expected_os)
-            elif group_name.startswith("status_"):
-                expected_status = group_name[len("status_"):]
-                for host in group.get_hosts():
-                    is_up = self._is_flag_set_value(host.get_vars().get("libre_status"))
-                    self.assertEqual("up" if is_up else "down", expected_status)
-
-    @staticmethod
-    def _is_flag_set_value(value):
-        return str(value) not in ("0", "", "None")
-
     def test_device_group_membership_matches_raw_api(self):
         raw_groups_response = _raw_get("/devicegroups")
         raw_group_names = (
@@ -216,7 +195,7 @@ class TestLiveGrouping(LiveLibrenmsTestCase):
 
 class TestLiveCli(LiveLibrenmsTestCase):
     def test_ansible_inventory_cli_runs_cleanly(self):
-        config_path = write_config(group_by=["os"])
+        config_path = write_config()
         self._configs.append(config_path)
 
         env = dict(os.environ)
