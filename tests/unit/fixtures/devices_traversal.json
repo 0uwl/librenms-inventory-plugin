@@ -1,0 +1,13 @@
+{
+    "status": "ok",
+    "count": 1,
+    "devices": [
+        {
+            "device_id": 99,
+            "hostname": "../../etc/evil",
+            "sysName": "../../etc/evil",
+            "disabled": 0,
+            "ignore": 0
+        }
+    ]
+}

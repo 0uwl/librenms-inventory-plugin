@@ -154,6 +154,45 @@ alongside `librenms` (see `examples/ansible.cfg.example`). See
 ansible-inventory -v --list -i librenms.yml -i constructed.yml
 ```
 
+### Grouping by data LibreNMS doesn't have (eg. environment)
+
+For information that has no source in LibreNMS at all - which environment a device is
+in, an owning team, etc - nothing can derive it automatically, so a person has to set it
+per host. The standard place for that is a `host_vars/<hostname>.yml` file (matching the
+Ansible inventory hostname exactly), which Ansible merges on top of whatever
+`librenms.yml` set for that host automatically - no plugin changes needed:
+
+```yaml
+# host_vars/core-sw1.yml
+deploy_environment: prod
+```
+
+(Not named `environment` - that's a reserved Ansible keyword used to set task/play
+environment variables, and Ansible will warn on every run if it's reused as a plain
+hostvar.)
+
+Creating one of these files by hand for every device LibreNMS reports doesn't scale, so
+`scripts/sync_host_vars.py` fetches the current device list through this plugin and
+creates a `host_vars/<hostname>.yml` stub for any host that doesn't already have one -
+existing files are never touched, so whatever you've filled in is safe. Run it whenever
+new devices show up in LibreNMS:
+
+```
+python3 scripts/sync_host_vars.py -i librenms.yml
+```
+
+Then edit the (mostly empty, just commented) stub files it created to fill in
+`deploy_environment` etc. To group on that with `constructed`, set
+`use_vars_plugins: true` in `constructed.yml`: by default `constructed` only sees
+variables set directly by inventory plugins, not `host_vars`/`group_vars` files, so this
+is required for `deploy_environment` to be visible to its
+`keyed_groups`/`groups`/`compose` expressions. See `examples/constructed.yml.dist` for a
+complete example, and run all sources together:
+
+```
+ansible-inventory -v --list -i librenms.yml -i constructed.yml
+```
+
 ## Migrating from mschedrin/librenms-ansible-inventory-plugin
 
 - The plugin file now lives at `inventory_plugins/librenms.py` instead of the repo root.
