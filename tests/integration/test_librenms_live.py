@@ -83,7 +83,7 @@ def write_config(**overrides):
     config = {"plugin": "librenms", "validate_certs": False, "cache": False}
     config.update(overrides)
 
-    lines = ["{0}: {1}".format(key, json.dumps(value)) for key, value in config.items()]
+    lines = [f"{key}: {json.dumps(value)}" for key, value in config.items()]
     content = "\n".join(lines) + "\n"
 
     handle = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)

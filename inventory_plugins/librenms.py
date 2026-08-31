@@ -177,7 +177,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
     # --- HTTP / caching -------------------------------------------------
 
     def _http_request(self, url):
-        self.display.vvv("Fetching: {0}".format(url))
+        self.display.vvv(f"Fetching: {url}")
         try:
             response = open_url(
                 url,
@@ -211,15 +211,15 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             # eg. "No devices found in group 'x'", "No devices found", "No groups found".
             if re.search(r"no (devices|device groups?|groups?) found", message, re.IGNORECASE):
                 return {}
-            raise AnsibleError("LibreNMS API error: {0}".format(message))
+            raise AnsibleError(f"LibreNMS API error: {message}")
 
         if http_status is not None:
             raise AnsibleError(
-                "LibreNMS API request to {0} failed with HTTP {1}: {2}".format(url, http_status, raw)
+                f"LibreNMS API request to {url} failed with HTTP {http_status}: {raw}"
             )
 
         if payload is None:
-            raise AnsibleError("Incorrect JSON payload from LibreNMS API: {0}".format(raw))
+            raise AnsibleError(f"Incorrect JSON payload from LibreNMS API: {raw}")
 
         return payload
 

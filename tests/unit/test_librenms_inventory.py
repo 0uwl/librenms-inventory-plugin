@@ -95,7 +95,7 @@ def make_open_url(routes=None, call_log=None, request_log=None):
                 if isinstance(route, RawResponse):
                     return route
                 return FakeResponse(load_fixture(route))
-        raise AssertionError("Unexpected URL requested: {0}".format(url))
+        raise AssertionError(f"Unexpected URL requested: {url}")
 
     return _open_url
 
@@ -111,7 +111,7 @@ def write_config(**overrides):
 
     lines = []
     for key, value in config.items():
-        lines.append("{0}: {1}".format(key, json.dumps(value)))
+        lines.append(f"{key}: {json.dumps(value)}")
     content = "\n".join(lines) + "\n"
 
     handle = tempfile.NamedTemporaryFile(
