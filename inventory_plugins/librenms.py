@@ -224,8 +224,18 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         return payload
 
     def _fetch(self, url):
+        """Fetch data from LibreNMS or the cache if it's enabled and contains data for the request
+
+        Args:
+            url (str): The API request sent to LibreNMS or the cache
+
+        Returns:
+            payload(dict): The returned value of the fetch
+        """
+        # Look for the cache key corresponding to the URL
         cache_key = self.get_cache_key(url)
         user_cache_setting = self.get_option("cache")
+        # Decide if the cache should be read and used
         attempt_to_read_cache = user_cache_setting and self.use_cache and not self.cache_force_update
 
         payload = None
@@ -245,6 +255,12 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
     # --- Data retrieval ---------------------------------------------------
 
     def _get_devices(self):
+        """Get all devices. Appends optional filters to the request URL that the user
+        might have defined in the plugin file
+
+        Returns:
+            devices(list): A list of all devices, empty if no devices are found
+        """
         url = self.api_endpoint + "/devices"
         query_params = []
         if self.device_status_filter and self.device_status_filter != "all":
@@ -257,19 +273,29 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         return payload.get("devices", [])
 
     def _get_device_group_membership(self):
+        """Get a dictionary of group memberships per device ID. Apply optional regex filters
+        the user might have defined in the plugin file
+
+        Returns:
+            membership(defaultdict): A dict keyed with the device IDs with a list of their group memberships.
+                                    If a device ID is not in this dict, it has no group memberships
+        """
+        # Fetch all defined groups
         payload = self._fetch(self.api_endpoint + "/devicegroups")
         all_groups = payload.get("groups", [])
 
+        # Filter on the defined regex patterns, if any
         if self.group_name_regex_filter:
             groups = [
-                g
-                for g in all_groups
-                if any(re.match(f, g["name"], self.re_flags) for f in self.group_name_regex_filter)
+                group
+                for group in all_groups
+                if any(re.match(pattern, group["name"], self.re_flags) for pattern in self.group_name_regex_filter)
             ]
         else:
             groups = all_groups
 
         membership = defaultdict(list)
+        # Fetch the members of each fetched group and map them together
         for group in groups:
             member_payload = self._fetch(self.api_endpoint + "/devicegroups/" + group["name"])
             for device in member_payload.get("devices", []):
@@ -281,18 +307,38 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
     @staticmethod
     def _is_flag_set(value):
+        """Convert LibreNMS' way of representing device flags into usable booleans.
+        Flags could be "disabled" or "ignored" devices.
+
+        Args:
+            value (str): the value of a device property to be converted
+
+        Returns:
+            bool: The converted boolean value. False if value is 0 or None, True if anything else
+        """
         if value is None:
             return False
         return str(value) not in ("0", "")
 
     def _device_excluded(self, device):
+        """Test if the device should be excluded from the inventory. This can be done by setting
+        exclude_disabled or exclude_ignored or defining regex patterns of hostnames to include in
+        the plugin file
+
+        Args:
+            device (dict): A device dictionary fetched from the API
+
+        Returns:
+            bool: True if no patterns match or the device is set to disabled or ignored and the user
+                set the exclude_disabled or exclude_ignored to True in the plugin file. False otherwise
+        """
         if self.exclude_disabled and self._is_flag_set(device.get("disabled")):
             return True
         if self.exclude_ignored and self._is_flag_set(device.get("ignore")):
             return True
         if self.host_name_regex_filter:
             candidate = device.get("sysName") or device.get("hostname") or ""
-            if not any(re.match(f, candidate, self.re_flags) for f in self.host_name_regex_filter):
+            if not any(re.match(pattern, candidate, self.re_flags) for pattern in self.host_name_regex_filter):
                 return True
         return False
 
@@ -300,9 +346,27 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
     @staticmethod
     def _ascii_hostname(value):
+        """Convert the hostname from LibreNMS to ASCII
+
+        Args:
+            value (str): Raw LibreNMS hostname
+
+        Returns:
+            converted_hostname(str): The hostname decoded into ASCII
+        """
+        # Normalize the value into unicode, then encode and decode it to get a converted, ASCII value
         return unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
 
     def _derive_hostname(self, device):
+        """Get the hostname of the device, or generate a random uuid4 if no hostname can be derived
+        from the API data or what the user defined in the plugin file.
+
+        Args:
+            device (dict): A device dictionary fetched from the API
+
+        Returns:
+            str: The derived hostname for the given device
+        """
         if self.hostname_field:
             value = device.get(self.hostname_field)
             return self._ascii_hostname(str(value)) if value else str(uuid.uuid4())
@@ -315,6 +379,13 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         return str(uuid.uuid4())
 
     def _set_host_variables(self, hostname, device):
+        """Convert libreNMS API data into Ansible inventory variables. Prefixes 'libre_' to the
+        data field in LibreNMS
+
+        Args:
+            hostname (str): The hostname of the device
+            device (dict): The full device dictionary fetched from the API
+        """
         for field, value in device.items():
             if field in self.exclude_fields:
                 continue
@@ -323,41 +394,71 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
     # --- Grouping -----------------------------------------------------
 
     def _add_host_to_device_groups(self, device_id, hostname, membership):
+        """Add a host to groups according to its LibreNMS group memberships
+
+        Args:
+            device_id (int): The ID of the device
+            hostname (str): The hostname of the device
+            membership (dict): A mapping of device IDs to their corresponding group memberships
+        """
         for group_name in membership.get(device_id, []):
+            # Let Ansible transform the LibreNMS group name
             transformed_group_name = self._require_inventory().add_group(group_name)
+            # Add the host to the group
             self._require_inventory().add_host(group=transformed_group_name, host=hostname)
 
     # --- Main flow ------------------------------------------------------
 
     def _populate(self):
+        """Populate the dynamic inventory using data fetched from the LibreNMS API
+        """
+        # Get devices using any filters the user defined in the plugin file
         devices = self._get_devices()
 
+        # Get group memberships of all devices
         membership = {}
         if self.device_groups_as_ansible_groups:
             membership = self._get_device_group_membership()
 
+        # For every fetched device...
         for device in devices:
+            # Skip the device if it should be excluded according to user configuration
             if self._device_excluded(device):
                 continue
 
+            # Derive the hostname
             hostname = self._derive_hostname(device)
+
+            # Add the host to the dynamic inventory
             self._require_inventory().add_host(hostname)
+
+            # Set the host's variables
             self._set_host_variables(hostname, device)
 
+            # Add the host to all the groups it should be a member of
             if self.device_groups_as_ansible_groups:
                 self._add_host_to_device_groups(device.get("device_id"), hostname, membership)
 
     def _resolve_api_token(self):
-        # Supports api_token being a Jinja2 expression (eg. "{{ vaulted_librenms_token }}")
-        # evaluated against extra vars, so the token can live in an Ansible Vault-encrypted
-        # variable instead of plaintext in the inventory source file or an env var.
+        """Use Ansible's Templar to get the api_token from a separate Ansible variable.
+        Supports api_token being a Jinja2 expression (eg. "{{ vaulted_librenms_token }}")
+        evaluated against extra vars, so the token can live in an Ansible Vault-encrypted
+        variable instead of plaintext in the inventory source file or an env var.
+
+        Returns:
+            api_token: The rendered API token
+        """
         self.templar.available_variables = self._vars
         return self.templar.template(self.get_option("api_token"), fail_on_undefined=False)
 
     def parse(self, inventory, loader, path, cache=True):
+        # Let the Ansible plugin base class do its initialization of this module first
         super(InventoryModule, self).parse(inventory, loader, path)
+
+        # Parse the plugin file to get all properties defined
         self._read_config_data(path=path)
 
+        # Set the properties of the inventory plugin model
         self.api_endpoint = self.get_option("api_endpoint").rstrip("/")
         self.validate_certs = self.get_option("validate_certs")
         self.timeout = self.get_option("timeout")
@@ -380,4 +481,5 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         self.cache_force_update = self.get_option("cache_force_update")
         self.use_cache = cache
 
+        # Populate the dynamic inventory
         self._populate()

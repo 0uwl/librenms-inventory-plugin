@@ -58,7 +58,7 @@ group_name_regex_filter:
 
 Export your API token and test it:
 
-```
+```bash
 export LIBRENMS_TOKEN=your-token-here
 ansible-inventory -v --list -i librenms.yml
 ```
@@ -124,7 +124,7 @@ encrypts values *you* control at rest in files, it has no bearing on live API re
    still being parsed. To keep the value out of your shell history/CLI args, pass a
    vault-encrypted *file* as the extra-vars source instead of a literal value:
 
-   ```
+   ```bash
    ansible-vault encrypt_string --name librenms_api_token 'your-token' > secrets.yml
    ansible-inventory -i librenms.yml --list \
      --extra-vars @secrets.yml --vault-password-file ~/.vault_pass
@@ -150,7 +150,7 @@ plugin sets. `constructed` isn't enabled by default, so add it to `enable_plugin
 alongside `librenms` (see `examples/ansible.cfg.example`). See
 `examples/constructed.yml.dist` for a starting point, and run both sources together:
 
-```
+```bash
 ansible-inventory -v --list -i librenms.yml -i constructed.yml
 ```
 
@@ -166,18 +166,13 @@ Ansible inventory hostname exactly), which Ansible merges on top of whatever
 # host_vars/core-sw1.yml
 deploy_environment: prod
 ```
-
-(Not named `environment` - that's a reserved Ansible keyword used to set task/play
-environment variables, and Ansible will warn on every run if it's reused as a plain
-hostvar.)
-
 Creating one of these files by hand for every device LibreNMS reports doesn't scale, so
 `scripts/sync_host_vars.py` fetches the current device list through this plugin and
 creates a `host_vars/<hostname>.yml` stub for any host that doesn't already have one -
 existing files are never touched, so whatever you've filled in is safe. Run it whenever
 new devices show up in LibreNMS:
 
-```
+```bash
 python3 scripts/sync_host_vars.py -i librenms.yml
 ```
 
@@ -189,7 +184,7 @@ is required for `deploy_environment` to be visible to its
 `keyed_groups`/`groups`/`compose` expressions. See `examples/constructed.yml.dist` for a
 complete example, and run all sources together:
 
-```
+```bash
 ansible-inventory -v --list -i librenms.yml -i constructed.yml
 ```
 
@@ -209,7 +204,7 @@ ansible-inventory -v --list -i librenms.yml -i constructed.yml
 
 ## Testing
 
-```
+```bash
 python3 -m unittest discover -s tests/unit
 ```
 
@@ -226,25 +221,22 @@ never runs as part of a normal offline `tests/unit` run.
 Provide credentials either as real environment variables, or via a gitignored `.env`
 file at the repo root:
 
-```
+```bash
 LIBRENMS_API=http://your-test-instance/api/v0
 LIBRENMS_TOKEN=your-token
 ```
 
 Then run:
 
-```
+```bash
 python3 -m unittest discover -s tests/integration -v
 ```
 
 Every assertion is checked against a "ground truth" fetched directly from the same API
-at test time (not hardcoded fixture values), so the suite keeps working as the target
+at test time (no hardcoded fixture values), so the suite keeps working as the target
 instance's devices/groups change. It covers: default `exclude_disabled`/`exclude_ignored`
 filtering against the real `disabled`/`ignore` flags, `libre_*` hostvars matching the raw
 device payload, LibreNMS device-group membership
 (including the case where an instance has zero device groups, which some LibreNMS
 versions signal with an HTTP 404 rather than an empty list), and a real `ansible-inventory
 --list` subprocess run.
-
-Only use this against a disposable/test LibreNMS instance - never production, since it
-requires a real API token with read access to it.
