@@ -9,8 +9,8 @@ plugin: constructed
 
 # Required for keyed_groups/groups/compose below to see vars that come from
 # host_vars/group_vars files (eg. deploy_environment, hand-set per host - see the
-# README's Grouping section and scripts/sync_host_vars.py) rather than from librenms.yml
-# itself. Without this, constructed only sees vars set directly by inventory plugins.
+# README's Grouping section) rather than from librenms.yml itself. Without this,
+# constructed only sees vars set directly by inventory plugins.
 use_vars_plugins: true
 
 compose:
@@ -25,7 +25,8 @@ keyed_groups:
     key: libre_os
   - prefix: location
     key: libre_location
-  # deploy_environment isn't a LibreNMS field - it's set manually per host in
-  # host_vars/<hostname>.yml, typically stubbed out by scripts/sync_host_vars.py first.
+  # deploy_environment isn't a LibreNMS field - either set manually per host in
+  # host_vars/<hostname>.yml, or via the Purpose field with parse_purpose_field
+  # (see the README's Grouping section).
   - prefix: env
     key: deploy_environment

@@ -12,6 +12,10 @@ cache_timeout: 600
 exclude_disabled: true
 exclude_ignored: true
 
+# Parse a device's Purpose field as YAML and set the result as host vars - see the
+# README's Grouping section.
+# parse_purpose_field: true
+
 group_name_regex_filter:
   - ^group name1$
   - ^group name2$
