@@ -191,6 +191,56 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
         self.assertEqual(host_vars["libre_community"], "public")
         self.assertEqual(host_vars["libre_authpass"], "authsecret")
         self.assertEqual(host_vars["libre_cryptopass"], "cryptosecret")
+        
+    def test_parse_purpose_field(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_purpose.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+
+        host_vars = inventory.get_host("custom-sw1").get_vars()
+        self.assertTrue(host_vars["var1"])
+        self.assertFalse(host_vars["var2"])
+        self.assertEqual(host_vars["var3"], "test")
+
+    def test_purpose_no_parse_without_leading_yaml_prefix(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_purpose.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+
+        host_vars = inventory.get_host("custom-sw2").get_vars()
+        self.assertIsNone(host_vars.get("var1"))
+        self.assertIsNone(host_vars.get("var2"))
+        self.assertIsNone(host_vars.get("var3"))
+
+    def test_purpose_no_parse_non_dict(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_purpose.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+
+        host_vars = inventory.get_host("custom-fw1").get_vars()
+        self.assertIsNone(host_vars.get("hello"))
+
+    def test_purpose_field_supports_nested_lists_and_dicts(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_purpose.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+
+        host_vars = inventory.get_host("custom-sw3").get_vars()
+        self.assertEqual(host_vars["a_list"], ["one", "two"])
+        self.assertEqual(host_vars["a_dict"], {"nested_key": "nested_value"})
+
+    def test_purpose_field_missing_does_not_crash(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_purpose.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+
+        host_vars = inventory.get_host("custom-sw4").get_vars()
+        self.assertEqual(host_vars["libre_hardware"], "C9300")
 
 
 class TestFiltering(LibrenmsInventoryTestCase):
