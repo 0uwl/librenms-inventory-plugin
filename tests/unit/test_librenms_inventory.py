@@ -192,6 +192,17 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
         self.assertEqual(host_vars["libre_authpass"], "authsecret")
         self.assertEqual(host_vars["libre_cryptopass"], "cryptosecret")
         
+    def test_purpose_field_ignored_by_default(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_purpose.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        host_vars = inventory.get_host("custom-sw1").get_vars()
+        self.assertNotIn("var1", host_vars)
+        self.assertNotIn("var2", host_vars)
+        self.assertNotIn("var3", host_vars)
+
     def test_parse_purpose_field(self):
         routes = dict(DEFAULT_ROUTES)
         routes["/devices"] = "devices_purpose.json"
@@ -241,6 +252,15 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
 
         host_vars = inventory.get_host("custom-sw4").get_vars()
         self.assertEqual(host_vars["libre_hardware"], "C9300")
+
+    def test_purpose_field_tolerates_trailing_whitespace_on_marker_line(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_purpose.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+
+        host_vars = inventory.get_host("custom-sw5").get_vars()
+        self.assertTrue(host_vars["var1"])
 
 
 class TestFiltering(LibrenmsInventoryTestCase):

@@ -1,6 +1,6 @@
 {
     "status": "ok",
-    "count": 5,
+    "count": 6,
     "devices": [
         {
             "device_id": 51,
@@ -104,6 +104,26 @@
             "version": "15.2(7)",
             "uptime": 333333,
             "ip": "10.0.0.4"
+        },
+        {
+            "device_id": 56,
+            "hostname": "custom-sw5.example.com",
+            "sysName": "custom-sw5",
+            "os": "ios",
+            "os_version": "15.2",
+            "hardware": "C9300",
+            "type": "network",
+            "status": 1,
+            "location": "DC1",
+            "location_id": 1,
+            "disabled": 0,
+            "ignore": 0,
+            "purpose": "---  \nvar1: true",
+            "vendor": "Cisco",
+            "serial": "ABC129",
+            "version": "15.2(7)",
+            "uptime": 444444,
+            "ip": "10.0.0.5"
         }
     ]
 }

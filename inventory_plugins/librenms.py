@@ -420,7 +420,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         Returns:
             parsed_variables(dict): A dictionary of key-value parsed from the purpose field
         """
-        if not purpose_value.splitlines()[0] == '---':
+        if not purpose_value.splitlines()[0].strip() == '---':
             self.display.vvv("Purpose field does not start with '---', not parsing")
             return None
 
