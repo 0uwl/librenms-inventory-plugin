@@ -124,6 +124,18 @@ DOCUMENTATION = r"""
                 - community
                 - authpass
                 - cryptopass
+        parse_purpose_field:
+            description:
+                - Parse a device's purpose field as YAML and add them as host vars. Purpose
+                  field must start with '---'. Only basic variables are allowed
+                - Purpose-derived vars are set as-is, without a C(libre_) prefix, so they can
+                  be used directly (eg. C(ansible_host), C(ansible_user)). This means a key
+                  that collides with a reserved Ansible variable name (eg. C(groups),
+                  C(hostvars), C(ansible_connection)) will override that variable for the
+                  host. Devices with untrusted or multi-admin-edited purpose fields should
+                  avoid this option, or admins should be made aware of the risk.
+            type: bool
+            default: false
 """
 
 EXAMPLES = r"""
@@ -154,6 +166,7 @@ import re
 import unicodedata
 import urllib.error
 import uuid
+import yaml
 from collections import defaultdict
 
 from ansible.errors import AnsibleError
@@ -380,17 +393,49 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
     def _set_host_variables(self, hostname, device):
         """Convert libreNMS API data into Ansible inventory variables. Prefixes 'libre_' to the
-        data field in LibreNMS
+        data field in LibreNMS. Also sets variables taken from the purpose field if that is configured
+        in the plugin file
 
         Args:
             hostname (str): The hostname of the device
             device (dict): The full device dictionary fetched from the API
         """
+        if self.parse_purpose_field and device.get('purpose'):
+            purpose_variables = self._parse_purpose(device.get('purpose'))
+            if purpose_variables is not None:
+                for field, value in purpose_variables.items():
+                    self._require_inventory().set_variable(hostname, field, value)
+
         for field, value in device.items():
             if field in self.exclude_fields:
                 continue
             self._require_inventory().set_variable(hostname, "libre_" + field, value)
 
+    def _parse_purpose(self, purpose_value: str):
+        """Parses the LibreNMS purpose field as YAML
+
+        Args:
+            purpose_value (str): the raw purpose field taken from the API
+
+        Returns:
+            parsed_variables(dict): A dictionary of key-value parsed from the purpose field
+        """
+        if not purpose_value.splitlines()[0].strip() == '---':
+            self.display.vvv("Purpose field does not start with '---', not parsing")
+            return None
+
+        try:
+            parsed = yaml.safe_load(purpose_value)
+        except yaml.YAMLError as e:
+            self.display.warning(f"Purpose field is not valid YAML, skipping: {e}")
+            return None
+
+        if not isinstance(parsed, dict):
+            self.display.vvv("Purpose field did not parse into a mapping, skipping")
+            return None
+
+        return parsed
+            
     # --- Grouping -----------------------------------------------------
 
     def _add_host_to_device_groups(self, device_id, hostname, membership):
@@ -434,7 +479,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
             # Set the host's variables
             self._set_host_variables(hostname, device)
-
+            
             # Add the host to all the groups it should be a member of
             if self.device_groups_as_ansible_groups:
                 self._add_host_to_device_groups(device.get("device_id"), hostname, membership)
@@ -477,6 +522,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         self.hostname_field = self.get_option("hostname_field")
         self.device_groups_as_ansible_groups = self.get_option("device_groups_as_ansible_groups")
+        self.parse_purpose_field = self.get_option("parse_purpose_field")
 
         self.cache_force_update = self.get_option("cache_force_update")
         self.use_cache = cache
