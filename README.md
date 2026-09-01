@@ -158,31 +158,44 @@ ansible-inventory -v --list -i librenms.yml -i constructed.yml
 
 For information that has no source in LibreNMS at all - which environment a device is
 in, an owning team, etc - nothing can derive it automatically, so a person has to set it
-per host. The standard place for that is a `host_vars/<hostname>.yml` file (matching the
-Ansible inventory hostname exactly), which Ansible merges on top of whatever
-`librenms.yml` set for that host automatically - no plugin changes needed:
+per host. Two ways to do that:
+
+**Option 1: the Purpose field.** Set `parse_purpose_field: true`, then put YAML in a
+device's Purpose field in the LibreNMS UI, starting with a `---` line:
+
+```
+---
+deploy_environment: prod
+```
+
+The plugin parses everything after the `---` and sets each key as a host var, directly
+on that host. Purpose-derived vars are set as-is (not `libre_`-prefixed), so they can be 
+used directly, including Ansible special vars like `ansible_host`/`ansible_user`. That 
+also means a key that collides with a reserved Ansible variable name (eg. `groups`, 
+`hostvars`) will override it for that host, so be mindful of the names you give to variables.
+Also know that anyone with LibreNMS edit access to  a device can set arbitrary host vars for 
+it with this enabled. Only enable this if that's an acceptable risk. Malformed YAML in Purpose
+is skipped with a warning rather than failing the whole plugin run.
+
+**Option 2: `host_vars/<hostname>.yml`.** A file matching the Ansible inventory hostname
+exactly, which Ansible merges on top of whatever `librenms.yml` set for that host
+automatically - no plugin changes needed:
 
 ```yaml
 # host_vars/core-sw1.yml
 deploy_environment: prod
 ```
-Creating one of these files by hand for every device LibreNMS reports doesn't scale, so
-`scripts/sync_host_vars.py` fetches the current device list through this plugin and
-creates a `host_vars/<hostname>.yml` stub for any host that doesn't already have one -
-existing files are never touched, so whatever you've filled in is safe. Run it whenever
-new devices show up in LibreNMS:
 
-```bash
-python3 scripts/sync_host_vars.py -i librenms.yml
-```
+This keeps the data out of LibreNMS entirely (useful if Purpose is already used for
+something else, or LibreNMS edit access is broader than you'd want driving Ansible vars),
+at the cost of a file to create by hand for every device.
 
-Then edit the (mostly empty, just commented) stub files it created to fill in
-`deploy_environment` etc. To group on that with `constructed`, set
-`use_vars_plugins: true` in `constructed.yml`: by default `constructed` only sees
-variables set directly by inventory plugins, not `host_vars`/`group_vars` files, so this
-is required for `deploy_environment` to be visible to its
-`keyed_groups`/`groups`/`compose` expressions. See `examples/constructed.yml.dist` for a
-complete example, and run all sources together:
+Either way, to group on `deploy_environment` with `constructed`, set
+`use_vars_plugins: true` in `constructed.yml` if you're using the `host_vars` option: by
+default `constructed` only sees variables set directly by inventory plugins, not
+`host_vars`/`group_vars` files (Purpose-field vars don't need this, since the librenms
+plugin sets them directly). See `examples/constructed.yml.dist` for a complete example,
+and run all sources together:
 
 ```bash
 ansible-inventory -v --list -i librenms.yml -i constructed.yml
