@@ -285,7 +285,7 @@ class TestFiltering(LibrenmsInventoryTestCase):
         _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
 
         host_vars = inventory.get_host("core-sw4").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "ASR-920")
+        self.assertEqual(host_vars['libre_hardware'], "asr-920")
 
     def test_trim_hardware_isr(self):
         routes = dict(DEFAULT_ROUTES)
@@ -294,7 +294,7 @@ class TestFiltering(LibrenmsInventoryTestCase):
         _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
 
         host_vars = inventory.get_host("core-sw5").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "ISR4321")
+        self.assertEqual(host_vars['libre_hardware'], "isr4321")
 
     def test_trim_hardware_c(self):
         routes = dict(DEFAULT_ROUTES)
@@ -303,7 +303,7 @@ class TestFiltering(LibrenmsInventoryTestCase):
         _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
 
         host_vars = inventory.get_host("core-sw1").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "C9300")
+        self.assertEqual(host_vars['libre_hardware'], "c9300")
 
     def test_trim_hardware_ws(self):
         routes = dict(DEFAULT_ROUTES)
@@ -312,7 +312,7 @@ class TestFiltering(LibrenmsInventoryTestCase):
         _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
 
         host_vars = inventory.get_host("core-sw3").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "C3850")
+        self.assertEqual(host_vars['libre_hardware'], "c3850")
 
     def test_trim_hardware_n(self):
         routes = dict(DEFAULT_ROUTES)
@@ -321,7 +321,7 @@ class TestFiltering(LibrenmsInventoryTestCase):
         _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
 
         host_vars = inventory.get_host("core-sw2").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "N9K-C93180YC")
+        self.assertEqual(host_vars['libre_hardware'], "n9k-c93180yc")
 
     def test_trim_hardware_keeps_letter_suffix(self):
         routes = dict(DEFAULT_ROUTES)
@@ -330,7 +330,7 @@ class TestFiltering(LibrenmsInventoryTestCase):
         _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
 
         host_vars = inventory.get_host("core-sw6").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "C9200CX")
+        self.assertEqual(host_vars['libre_hardware'], "c9200cx")
 
     def test_trim_hardware_tolerates_missing_hardware(self):
         routes = dict(DEFAULT_ROUTES)
@@ -348,7 +348,7 @@ class TestFiltering(LibrenmsInventoryTestCase):
         _, inventory = self.build_plugin(routes=routes)
 
         host_vars = inventory.get_host("core-sw1").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "C9300-48P")
+        self.assertEqual(host_vars['libre_hardware'], "c9300")
 
 
 class TestGrouping(LibrenmsInventoryTestCase):

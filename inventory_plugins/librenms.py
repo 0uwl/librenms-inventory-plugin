@@ -436,7 +436,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 continue
             
             if self.trim_cisco_hardware and field == 'hardware':
-                value = self._trim_hardware(value).lower()
+                value = self._trim_hardware(value)
 
             self.inventory.set_variable(hostname, "libre_" + field, value)
 
@@ -486,7 +486,8 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             return hardware_value
 
         if (match := HARDWARE_FAMILY_RE.match(hardware_value)):
-            return match.group(match.lastgroup)
+            if match.lastgroup is not None:
+                return match.group(match.lastgroup).lower()
 
         self.display.vvv(f"Failed to parse hardware value: {hardware_value}")
         return hardware_value
