@@ -160,8 +160,8 @@ For information that has no source in LibreNMS at all - which environment a devi
 in, an owning team, etc - nothing can derive it automatically, so a person has to set it
 per host. Two ways to do that:
 
-**Option 1: the Purpose field.** Set `parse_purpose_field: true`, then put YAML in a
-device's Purpose field in the LibreNMS UI, starting with a `---` line:
+**Option 1: the Notes field.** Set `parse_notes_field: true`, then put YAML in a
+device's Notes field in the LibreNMS UI, starting with a `---` line:
 
 ```
 ---
@@ -169,12 +169,12 @@ deploy_environment: prod
 ```
 
 The plugin parses everything after the `---` and sets each key as a host var, directly
-on that host. Purpose-derived vars are set as-is (not `libre_`-prefixed), so they can be 
+on that host. Notes-derived vars are set as-is (not `libre_`-prefixed), so they can be 
 used directly, including Ansible special vars like `ansible_host`/`ansible_user`. That 
 also means a key that collides with a reserved Ansible variable name (eg. `groups`, 
 `hostvars`) will override it for that host, so be mindful of the names you give to variables.
 Also know that anyone with LibreNMS edit access to  a device can set arbitrary host vars for 
-it with this enabled. Only enable this if that's an acceptable risk. Malformed YAML in Purpose
+it with this enabled. Only enable this if that's an acceptable risk. Malformed YAML in Notes
 is skipped with a warning rather than failing the whole plugin run.
 
 **Option 2: `host_vars/<hostname>.yml`.** A file matching the Ansible inventory hostname
@@ -186,14 +186,14 @@ automatically - no plugin changes needed:
 deploy_environment: prod
 ```
 
-This keeps the data out of LibreNMS entirely (useful if Purpose is already used for
+This keeps the data out of LibreNMS entirely (useful if Notes is already used for
 something else, or LibreNMS edit access is broader than you'd want driving Ansible vars),
 at the cost of a file to create by hand for every device.
 
 Either way, to group on `deploy_environment` with `constructed`, set
 `use_vars_plugins: true` in `constructed.yml` if you're using the `host_vars` option: by
 default `constructed` only sees variables set directly by inventory plugins, not
-`host_vars`/`group_vars` files (Purpose-field vars don't need this, since the librenms
+`host_vars`/`group_vars` files (Notes-field vars don't need this, since the librenms
 plugin sets them directly). See `examples/constructed.yml.dist` for a complete example,
 and run all sources together:
 

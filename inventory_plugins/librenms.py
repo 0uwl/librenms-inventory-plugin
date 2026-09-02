@@ -124,15 +124,15 @@ DOCUMENTATION = r"""
                 - community
                 - authpass
                 - cryptopass
-        parse_purpose_field:
+        parse_notes_field:
             description:
-                - Parse a device's purpose field as YAML and add them as host vars. Purpose
-                  field must start with '---'. Only basic variables are allowed
-                - Purpose-derived vars are set as-is, without a C(libre_) prefix, so they can
+                - Parse a device's Notes field as YAML and add them as host vars. The field
+                  must start with '---'. Only basic variables are allowed
+                - Notes-derived vars are set as-is, without a C(libre_) prefix, so they can
                   be used directly (eg. C(ansible_host), C(ansible_user)). This means a key
                   that collides with a reserved Ansible variable name (eg. C(groups),
                   C(hostvars), C(ansible_connection)) will override that variable for the
-                  host. Devices with untrusted or multi-admin-edited purpose fields should
+                  host. Devices with untrusted or multi-admin-edited notes fields should
                   avoid this option, or admins should be made aware of the risk.
             type: bool
             default: false
@@ -159,6 +159,12 @@ group_name_regex_filter:
 # For property-based grouping (os, location, ...) or composed vars (eg. ansible_host,
 # ansible_network_os), add a second inventory source using Ansible's standard
 # `constructed` plugin over this one's output - see the README's Grouping section.
+
+# Enable this to read the Notes value as YAML and derrive additional host vars from it
+parse_notes_field: true
+
+# Enable this to trim the hardware string for Cisco models
+trim_cisco_hardware
 """
 
 import json
@@ -393,17 +399,17 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
     def _set_host_variables(self, hostname, device):
         """Convert libreNMS API data into Ansible inventory variables. Prefixes 'libre_' to the
-        data field in LibreNMS. Also sets variables taken from the purpose field if that is configured
+        data field in LibreNMS. Also sets variables taken from the notes field if that is configured
         in the plugin file
 
         Args:
             hostname (str): The hostname of the device
             device (dict): The full device dictionary fetched from the API
         """
-        if self.parse_purpose_field and device.get('purpose'):
-            purpose_variables = self._parse_purpose(device.get('purpose'))
-            if purpose_variables is not None:
-                for field, value in purpose_variables.items():
+        if self.parse_notes_field and device.get('notes'):
+            notes_variables = self._parse_notes(device.get('notes'))
+            if notes_variables is not None:
+                for field, value in notes_variables.items():
                     self._require_inventory().set_variable(hostname, field, value)
 
         for field, value in device.items():
@@ -411,27 +417,27 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 continue
             self._require_inventory().set_variable(hostname, "libre_" + field, value)
 
-    def _parse_purpose(self, purpose_value: str):
-        """Parses the LibreNMS purpose field as YAML
+    def _parse_notes(self, notes_value: str):
+        """Parses the LibreNMS notes field as YAML
 
         Args:
-            purpose_value (str): the raw purpose field taken from the API
+            notes_value (str): the raw notes field taken from the API
 
         Returns:
-            parsed_variables(dict): A dictionary of key-value parsed from the purpose field
+            parsed_variables(dict): A dictionary of key-value parsed from the notes field
         """
-        if not purpose_value.splitlines()[0].strip() == '---':
-            self.display.vvv("Purpose field does not start with '---', not parsing")
+        if not notes_value.splitlines()[0].strip() == '---':
+            self.display.vvv("Notes field does not start with '---', not parsing")
             return None
 
         try:
-            parsed = yaml.safe_load(purpose_value)
+            parsed = yaml.safe_load(notes_value)
         except yaml.YAMLError as e:
-            self.display.warning(f"Purpose field is not valid YAML, skipping: {e}")
+            self.display.warning(f"Notes field is not valid YAML, skipping: {e}")
             return None
 
         if not isinstance(parsed, dict):
-            self.display.vvv("Purpose field did not parse into a mapping, skipping")
+            self.display.vvv("Notes field did not parse into a mapping, skipping")
             return None
 
         return parsed
@@ -522,7 +528,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         self.hostname_field = self.get_option("hostname_field")
         self.device_groups_as_ansible_groups = self.get_option("device_groups_as_ansible_groups")
-        self.parse_purpose_field = self.get_option("parse_purpose_field")
+        self.parse_notes_field = self.get_option("parse_notes_field")
 
         self.cache_force_update = self.get_option("cache_force_update")
         self.use_cache = cache

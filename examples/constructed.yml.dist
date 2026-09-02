@@ -18,6 +18,7 @@ compose:
   ansible_network_os: "{'iosxe': 'ios'}.get(libre_os, libre_os)"
 
 groups:
+  # The variable 'purpose' is referred as 'description' in the LibreNMS UI
   network_edge: "'router' in libre_purpose | default('')"
 
 keyed_groups:
@@ -26,7 +27,7 @@ keyed_groups:
   - prefix: location
     key: libre_location
   # deploy_environment isn't a LibreNMS field - either set manually per host in
-  # host_vars/<hostname>.yml, or via the Purpose field with parse_purpose_field
+  # host_vars/<hostname>.yml, or via the Notes field with parse_notes_field
   # (see the README's Grouping section).
   - prefix: env
     key: deploy_environment
