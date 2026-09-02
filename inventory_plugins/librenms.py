@@ -445,21 +445,28 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         Args:
             notes_value (str): the raw notes field taken from the API
+            notes_value (str): the raw notes field taken from the API
 
         Returns:
             parsed_variables(dict): A dictionary of key-value parsed from the notes field
+            parsed_variables(dict): A dictionary of key-value parsed from the notes field
         """
+        if not notes_value.splitlines()[0].strip() == '---':
+            self.display.vvv("Notes field does not start with '---', not parsing")
         if not notes_value.splitlines()[0].strip() == '---':
             self.display.vvv("Notes field does not start with '---', not parsing")
             return None
 
         try:
             parsed = yaml.safe_load(notes_value)
+            parsed = yaml.safe_load(notes_value)
         except yaml.YAMLError as e:
+            self.display.warning(f"Notes field is not valid YAML, skipping: {e}")
             self.display.warning(f"Notes field is not valid YAML, skipping: {e}")
             return None
 
         if not isinstance(parsed, dict):
+            self.display.vvv("Notes field did not parse into a mapping, skipping")
             self.display.vvv("Notes field did not parse into a mapping, skipping")
             return None
 
