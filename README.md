@@ -71,9 +71,10 @@ Every field returned by the LibreNMS API for a device is set as a `libre_<field>
 host var (e.g. `libre_hardware`, `libre_os`, `libre_location`), except for the fields
 listed in `exclude_fields` (see [Sensitive fields](#sensitive-fields) below).
 
-One host var is derived rather than reported: `libre_hardware_variant`, set only when
-[hardware trimming](#trimming-hardware-to-a-product-family) is configured and leaves
-something behind.
+Two host vars are derived rather than reported - `libre_hardware_family` and
+`libre_hardware_variant` - and only exist when
+[hardware trimming](#trimming-hardware-to-a-product-family) is configured. Every other
+`libre_<field>` is exactly what the API returned; no option modifies one.
 
 Anything derived from those fields - e.g. `ansible_host` from `libre_hostname`, or
 `ansible_network_os` translated from `libre_os` (`iosxe` -> `ios`) - is left to a chained
@@ -82,14 +83,12 @@ Anything derived from those fields - e.g. `ansible_host` from `libre_hostname`, 
 ## Trimming hardware to a product family
 
 `libre_hardware` is the exact product ID LibreNMS discovered - `C9300-48P`,
-`WS-C3850-24T`, `N9K-C93180YC-EX`. Some might thing that is too specific to 
-group on: two switches of the same family land in different groups because their port
-counts differ.
+`WS-C3850-24T`, `N9K-C93180YC-EX`. That is too specific to group on: two switches of the
+same family land in different groups because their port counts differ.
 
-The plugin option `hardware_trimming_patterns` maps a LibreNMS `os` to a list of regular 
-expressions. For each device the patterns under its own `os` are tried in order and the 
-first match wins; devices whose `os` has no entry are left alone. The option is off until 
-you set it.
+`hardware_trimming_patterns` maps a LibreNMS `os` to a list of regular expressions. For
+each device the patterns under its own `os` are tried in order and the first match wins.
+The option is off until you set it.
 
 ```yaml
 # librenms.yml
@@ -102,77 +101,92 @@ hardware_trimming_patterns:
     - '^[NC]?\dK-C\d+[A-Z]*'
 ```
 
-| reported hardware | `os` | `libre_hardware` | `libre_hardware_variant` |
+This **adds** two host vars and leaves `libre_hardware` alone:
+
+| `libre_hardware` | `os` | `libre_hardware_family` | `libre_hardware_variant` |
 | --- | --- | --- | --- |
 | `C9300-48P` | `iosxe` | `C9300` | `48P` |
 | `C9200CX-12P-2X2G` | `iosxe` | `C9200CX` | `12P-2X2G` |
 | `WS-C3850-24T` | `ios` | `C3850` | `24T` |
 | `N9K-C93180YC-EX` | `nxos` | `N9K-C93180YC` | `EX` |
 | `N7K-C7010` | `nxos` | `N7K-C7010` | *(unset)* |
+| `EX4300-48T` | `junos` | `EX4300-48T` | *(unset)* |
+
+Group on the family instead of the raw value:
+
+```yaml
+# constructed.yml
+keyed_groups:
+  - key: libre_hardware_family
+    prefix: hw
+```
 
 Two things to know when writing patterns:
 
 - **A capture group drops what precedes it.** Without a group the whole match becomes the
-  value; with one, only the first group does. That is how `^WS-(C\d+[A-Z]*)` puts older
+  family; with one, only the first group does. That is how `^WS-(C\d+[A-Z]*)` puts older
   Catalyst switches under `C3850` rather than a `WS-C3850` namespace of their own.
 - **Order matters.** Patterns are tried top to bottom, so put the specific ones first.
-  Under `nxos`, `^C\d+[A-Z]*` before `^[NC]?\dK-C\d+[A-Z]*` would trim `C9K-C93180YC` to
-  `C9` rather than `C9K-C93180YC`.
+  Under `nxos`, `^C\d+[A-Z]*` before `^[NC]?\dK-C\d+[A-Z]*` would give `C9K-C93180YC` a
+  family of `C9` rather than `C9K-C93180YC`.
 
 Keying on `os` rather than a vendor is deliberate: LibreNMS always populates `os`, and it
 already separates Catalyst from Nexus, whose product IDs need different patterns. Use a
 YAML anchor, as above, when several `os` values share a list. Nothing here is
-Cisco-specific - `junos: ['^EX\d+']` trims `EX4300-48T` to `EX4300`.
+Cisco-specific - `junos: ['^EX\d+']` gives `EX4300-48T` a family of `EX4300`.
 
 An invalid regular expression fails the inventory run immediately and names the pattern,
 rather than silently skipping devices.
 
-### The variant
+### Why `libre_hardware` is left alone
 
-Whatever a pattern leaves behind is set as `libre_hardware_variant`, so the detail you
-trimmed away is still available per host - port counts, uplink types, `/K9` licensing
-suffixes:
+The family and the variant together are lossy, so the reported product ID has to survive
+somewhere. `^WS-(C\d+[A-Z]*)` matches the `WS-` and discards it: `WS-C3850-24T` becomes a
+family of `C3850` and a variant of `24T`, and nothing recombines those into the original.
+Anything a pattern consumes without capturing is gone from both derived vars, which is
+exactly what you want for grouping and exactly what you do not want when looking up a
+spare or an end-of-life date.
+
+So `libre_hardware` keeps holding what the API returned, under every combination of these
+options, and the derived vars are additive.
+
+### The family and the variant
+
+`libre_hardware_family` is the trimmed value. Devices whose `os` has no patterns, and
+values that match none of their patterns, get the full product ID as their family - so a
+`keyed_groups` on it covers every device, with the untrimmed ones simply grouped more
+finely.
+
+`libre_hardware_variant` is what the pattern left behind, with the separator it broke on
+stripped, so `C9300-48P` gives `48P` rather than `-48P`. It is left unset - not empty, not
+`None` - for devices whose product ID is only a family, so `keyed_groups` on the variant
+cannot invent a group for devices that do not have one. Guard with `is defined`:
 
 ```yaml
 # constructed.yml
 compose:
   # e.g. "C9300 (48P)"
   hardware_description: >-
-    libre_hardware ~ (' (' ~ libre_hardware_variant ~ ')'
+    libre_hardware_family ~ (' (' ~ libre_hardware_variant ~ ')'
     if libre_hardware_variant is defined else '')
 ```
 
-The separator the pattern broke on is stripped, so `C9300-48P` gives `48P` rather than
-`-48P`. Text a pattern *consumed* is not part of the variant: `^WS-(C\d+[A-Z]*)` matches
-the `WS-` and discards it, so it appears in neither variable.
-
-The variable is left unset - not empty, not `None` - for devices whose product ID is only
-a family (`N7K-C7010`), for devices whose `os` has no patterns, and when trimming is off
-entirely. That way `keyed_groups` on the variant cannot invent a group for devices that
-do not have one. Guard with `is defined` in templates, as above.
+Both are unset for devices LibreNMS reports no hardware for, and when
+`hardware_trimming_patterns` is not configured at all.
 
 ### Lowercasing
 
-Trimming keeps the casing LibreNMS reported. `lowercase_hardware` lowercases
-`libre_hardware` so it can be dropped straight into a group name without a Jinja filter
-on the consuming side:
+The family keeps the casing LibreNMS reported. `lowercase_hardware_family` lowercases the
+family and the variant so they can be dropped straight into a group name without a Jinja
+filter on the consuming side:
 
 ```yaml
 # librenms.yml
-lowercase_hardware: true
+lowercase_hardware_family: true   # -> hw_c9300, hw_n9k_c93180yc
 ```
 
-```yaml
-# constructed.yml
-keyed_groups:
-  - key: libre_hardware
-    prefix: hw          # -> hw_c9300, hw_n9k_c93180yc
-```
-
-It applies to every device that reports a hardware value, trimmed or not, and to
-`libre_hardware_variant` where that is set. Trimming runs first. Enable it alongside trimming when you group on hardware: devices whose `os`
-has no patterns would otherwise keep their original casing and land in differently-cased
-groups from the ones that were trimmed.
+`libre_hardware` is not affected. The option does nothing unless
+`hardware_trimming_patterns` is configured.
 
 ## Sensitive fields
 

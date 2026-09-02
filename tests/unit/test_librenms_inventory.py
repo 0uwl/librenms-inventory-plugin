@@ -301,24 +301,55 @@ class TestHardwareTrimming(LibrenmsInventoryTestCase):
             for hostname in inventory.hosts
         }
 
-    def trimmed_hardware(self, patterns=None, **overrides):
-        """{hostname: libre_hardware} over the hardware fixture"""
+    def collect(self, variable, patterns=None, **overrides):
+        """{hostname: <variable>} over the hardware fixture, hosts without it omitted"""
         return {
-            hostname: host_vars["libre_hardware"]
+            hostname: host_vars[variable]
             for hostname, host_vars in self.host_vars(patterns, **overrides).items()
+            if variable in host_vars
         }
 
-    def hardware_variants(self, patterns=None, **overrides):
-        """{hostname: libre_hardware_variant} over the hardware fixture, unset hosts omitted"""
-        return {
-            hostname: host_vars["libre_hardware_variant"]
-            for hostname, host_vars in self.host_vars(patterns, **overrides).items()
-            if "libre_hardware_variant" in host_vars
+    def families(self, patterns=None, **overrides):
+        return self.collect("libre_hardware_family", patterns, **overrides)
+
+    def variants(self, patterns=None, **overrides):
+        return self.collect("libre_hardware_variant", patterns, **overrides)
+
+    # --- libre_hardware is never modified ---------------------------------
+
+    def test_libre_hardware_always_holds_the_api_value(self):
+        reported = {
+            "core-sw1": "C9300-48P",
+            "core-sw2": "N9K-C93180YC-EX",
+            "core-sw3": "WS-C3850-24T",
+            "core-sw4": "ASR-920-24SZ-M",
+            "core-sw5": "ISR4321/K9",
+            "core-sw6": "C9200CX-12P-2X2G",
+            "core-sw7": None,
+            "edge-sw1": "EX4300-48T",
         }
+
+        self.assertEqual(self.collect("libre_hardware"), reported)
+        self.assertEqual(self.collect("libre_hardware", self.PATTERNS), reported)
+        self.assertEqual(
+            self.collect("libre_hardware", self.PATTERNS, lowercase_hardware_family=True),
+            reported,
+        )
+
+    def test_product_id_survives_a_pattern_that_drops_a_prefix(self):
+        # C3850 + 24T cannot be recombined into WS-C3850-24T, so libre_hardware is the
+        # only place the full product ID exists
+        host_vars = self.host_vars(self.PATTERNS)["core-sw3"]
+
+        self.assertEqual(host_vars["libre_hardware"], "WS-C3850-24T")
+        self.assertEqual(host_vars["libre_hardware_family"], "C3850")
+        self.assertEqual(host_vars["libre_hardware_variant"], "24T")
+
+    # --- libre_hardware_family --------------------------------------------
 
     def test_each_os_is_trimmed_with_its_own_patterns(self):
         self.assertEqual(
-            self.trimmed_hardware(self.PATTERNS),
+            self.families(self.PATTERNS),
             {
                 "core-sw1": "C9300",
                 "core-sw2": "N9K-C93180YC",
@@ -326,95 +357,54 @@ class TestHardwareTrimming(LibrenmsInventoryTestCase):
                 "core-sw4": "ASR-920",
                 "core-sw5": "ISR4321",
                 "core-sw6": "C9200CX",
-                # LibreNMS could not identify the hardware
-                "core-sw7": None,
-                # junos has no patterns configured, so it is left alone
+                # junos has no patterns, so the family is the full product ID
                 "edge-sw1": "EX4300-48T",
             },
         )
 
-    def test_capture_group_drops_the_prefix(self):
-        # ^WS-(C\d+[A-Z]*) keeps only the group, so older Catalyst switches land on the
-        # same family names as the 9K generation instead of on a WS- namespace of
-        # their own.
-        hardware = self.trimmed_hardware({"ios": [r"^WS-(C\d+[A-Z]*)"]})
-
-        self.assertEqual(hardware["core-sw3"], "C3850")
-
     def test_first_matching_pattern_wins(self):
-        hardware = self.trimmed_hardware({"iosxe": [r"^(C9)\d+", r"^C\d+[A-Z]*"]})
+        families = self.families({"iosxe": [r"^(C9)\d+", r"^C\d+[A-Z]*"]})
 
-        self.assertEqual(hardware["core-sw1"], "C9")
+        self.assertEqual(families["core-sw1"], "C9")
 
     def test_os_key_is_matched_case_insensitively(self):
-        hardware = self.trimmed_hardware({"IOSXE": [r"^C\d+[A-Z]*"]})
+        families = self.families({"IOSXE": [r"^C\d+[A-Z]*"]})
 
-        self.assertEqual(hardware["core-sw1"], "C9300")
+        self.assertEqual(families["core-sw1"], "C9300")
 
     def test_non_cisco_hardware_can_be_trimmed(self):
-        hardware = self.trimmed_hardware({"junos": [r"^EX\d+"]})
+        families = self.families({"junos": [r"^EX\d+"]})
 
-        self.assertEqual(hardware["edge-sw1"], "EX4300")
+        self.assertEqual(families["edge-sw1"], "EX4300")
 
-    def test_value_is_untouched_when_no_pattern_matches(self):
-        hardware = self.trimmed_hardware({"junos": [r"^SRX\d+"]})
+    def test_family_falls_back_to_the_reported_value_when_nothing_matches(self):
+        families = self.families({"junos": [r"^SRX\d+"]})
 
-        self.assertEqual(hardware["edge-sw1"], "EX4300-48T")
+        self.assertEqual(families["edge-sw1"], "EX4300-48T")
 
-    def test_hardware_untouched_by_default(self):
-        hardware = self.trimmed_hardware()
+    def test_no_derived_variables_without_patterns(self):
+        self.assertEqual(self.families(), {})
+        self.assertEqual(self.variants(), {})
 
-        self.assertEqual(hardware["core-sw1"], "C9300-48P")
-        self.assertEqual(hardware["core-sw3"], "WS-C3850-24T")
+    def test_no_derived_variables_when_hardware_is_missing(self):
+        host_vars = self.host_vars(self.PATTERNS)["core-sw7"]
 
-    def test_missing_hardware_is_tolerated(self):
-        hardware = self.trimmed_hardware(self.PATTERNS)
+        self.assertIsNone(host_vars["libre_hardware"])
+        self.assertNotIn("libre_hardware_family", host_vars)
+        self.assertNotIn("libre_hardware_variant", host_vars)
 
-        self.assertIsNone(hardware["core-sw7"])
+    def test_no_derived_variables_when_hardware_is_excluded(self):
+        host_vars = self.host_vars(self.PATTERNS, exclude_fields=["hardware"])["core-sw1"]
 
-    def test_invalid_pattern_is_rejected(self):
-        bad_pattern = r"^C(9\d+"
+        self.assertNotIn("libre_hardware", host_vars)
+        self.assertNotIn("libre_hardware_family", host_vars)
+        self.assertNotIn("libre_hardware_variant", host_vars)
 
-        with self.assertRaises(AnsibleError) as raised:
-            self.trimmed_hardware({"ios": [r"^C\d+", bad_pattern]})
-
-        message = str(raised.exception)
-        self.assertIn("invalid regular expression", message)
-        # the offending pattern must be named, otherwise it is unfindable in a big config
-        self.assertIn(repr(bad_pattern), message)
-
-    def test_patterns_must_be_a_list(self):
-        with self.assertRaises(AnsibleError) as raised:
-            self.trimmed_hardware({"ios": r"^C\d+"})
-
-        self.assertIn("must be a list", str(raised.exception))
-
-    def test_lowercase_hardware_normalises_trimmed_values(self):
-        hardware = self.trimmed_hardware(self.PATTERNS, lowercase_hardware=True)
-
-        self.assertEqual(hardware["core-sw1"], "c9300")
-        self.assertEqual(hardware["core-sw2"], "n9k-c93180yc")
-
-    def test_lowercase_hardware_also_applies_to_untrimmed_values(self):
-        # junos has no patterns, so without this the trimmed and untrimmed devices would
-        # end up in differently-cased groups
-        hardware = self.trimmed_hardware(self.PATTERNS, lowercase_hardware=True)
-
-        self.assertEqual(hardware["edge-sw1"], "ex4300-48t")
-
-    def test_lowercase_hardware_works_without_any_patterns(self):
-        hardware = self.trimmed_hardware(lowercase_hardware=True)
-
-        self.assertEqual(hardware["core-sw1"], "c9300-48p")
-
-    def test_lowercase_hardware_tolerates_missing_hardware(self):
-        hardware = self.trimmed_hardware(self.PATTERNS, lowercase_hardware=True)
-
-        self.assertIsNone(hardware["core-sw7"])
+    # --- libre_hardware_variant -------------------------------------------
 
     def test_variant_holds_what_the_pattern_left_behind(self):
         self.assertEqual(
-            self.hardware_variants(self.PATTERNS),
+            self.variants(self.PATTERNS),
             {
                 "core-sw1": "48P",
                 "core-sw2": "EX",
@@ -425,36 +415,52 @@ class TestHardwareTrimming(LibrenmsInventoryTestCase):
             },
         )
 
-    def test_variant_excludes_text_the_pattern_consumed(self):
-        # ^WS-(C\d+[A-Z]*) drops the WS- deliberately, so it belongs to neither var
-        host_vars = self.host_vars({"ios": [r"^WS-(C\d+[A-Z]*)"]})["core-sw3"]
-
-        self.assertEqual(host_vars["libre_hardware"], "C3850")
-        self.assertEqual(host_vars["libre_hardware_variant"], "24T")
-
     def test_variant_is_unset_when_the_pattern_consumes_everything(self):
-        variants = self.hardware_variants({"iosxe": [r"^C\d+[A-Z]*-\d+P$"]})
+        variants = self.variants({"iosxe": [r"^C\d+[A-Z]*-\d+P$"]})
 
         self.assertNotIn("core-sw1", variants)
 
-    def test_variant_is_unset_without_trimming(self):
-        self.assertEqual(self.hardware_variants(), {})
-
     def test_variant_is_unset_when_no_pattern_matches(self):
-        variants = self.hardware_variants({"junos": [r"^SRX\d+"]})
+        variants = self.variants({"junos": [r"^SRX\d+"]})
 
         self.assertNotIn("edge-sw1", variants)
 
-    def test_variant_is_lowercased_with_the_hardware_value(self):
-        variants = self.hardware_variants(self.PATTERNS, lowercase_hardware=True)
+    # --- lowercase_hardware_family ----------------------------------------
 
-        self.assertEqual(variants["core-sw1"], "48p")
-        self.assertEqual(variants["core-sw4"], "24sz-m")
+    def test_lowercase_applies_to_the_derived_variables(self):
+        host_vars = self.host_vars(self.PATTERNS, lowercase_hardware_family=True)["core-sw1"]
 
-    def test_variant_is_unset_when_hardware_is_excluded(self):
-        variants = self.hardware_variants(self.PATTERNS, exclude_fields=["hardware"])
+        self.assertEqual(host_vars["libre_hardware_family"], "c9300")
+        self.assertEqual(host_vars["libre_hardware_variant"], "48p")
 
-        self.assertEqual(variants, {})
+    def test_lowercase_applies_to_untrimmed_families(self):
+        # junos has no patterns, so without this it would land in a differently-cased
+        # group from the devices that were trimmed
+        families = self.families(self.PATTERNS, lowercase_hardware_family=True)
+
+        self.assertEqual(families["edge-sw1"], "ex4300-48t")
+
+    def test_lowercase_has_no_effect_without_patterns(self):
+        self.assertEqual(self.families(lowercase_hardware_family=True), {})
+
+    # --- option validation -------------------------------------------------
+
+    def test_invalid_pattern_is_rejected(self):
+        bad_pattern = r"^C(9\d+"
+
+        with self.assertRaises(AnsibleError) as raised:
+            self.host_vars({"ios": [r"^C\d+", bad_pattern]})
+
+        message = str(raised.exception)
+        self.assertIn("invalid regular expression", message)
+        # the offending pattern must be named, otherwise it is unfindable in a big config
+        self.assertIn(repr(bad_pattern), message)
+
+    def test_patterns_must_be_a_list(self):
+        with self.assertRaises(AnsibleError) as raised:
+            self.host_vars({"ios": r"^C\d+"})
+
+        self.assertIn("must be a list", str(raised.exception))
 
 
 class TestGrouping(LibrenmsInventoryTestCase):

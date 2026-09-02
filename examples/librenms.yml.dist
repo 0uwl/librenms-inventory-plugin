@@ -16,9 +16,10 @@ exclude_ignored: true
 # README's Grouping section.
 # parse_notes_field: true
 
-# Trim libre_hardware down to a product family so devices can be grouped by family
-# instead of by exact product ID - see the README's "Trimming hardware to a product
-# family" section. Keyed on the LibreNMS os; first pattern to match wins.
+# Derive libre_hardware_family (and libre_hardware_variant) so devices can be grouped by
+# family instead of by exact product ID - see the README's "Trimming hardware to a
+# product family" section. libre_hardware itself is left untouched. Keyed on the LibreNMS
+# os; first pattern to match wins.
 # hardware_trimming_patterns:
 #   ios: &cisco_catalyst
 #     - '^WS-(C\d+[A-Z]*)'
@@ -27,9 +28,9 @@ exclude_ignored: true
 #   nxos:
 #     - '^[NC]?\dK-C\d+[A-Z]*'
 
-# Lowercase libre_hardware so it is safe to use directly in group names. Applies whether
-# or not the value was trimmed.
-# lowercase_hardware: true
+# Lowercase the derived family and variant so they are safe to use directly in group
+# names. Does not affect libre_hardware.
+# lowercase_hardware_family: true
 
 group_name_regex_filter:
   - ^group name1$
