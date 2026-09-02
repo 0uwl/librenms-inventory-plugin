@@ -124,16 +124,29 @@ DOCUMENTATION = r"""
                 - community
                 - authpass
                 - cryptopass
-        parse_purpose_field:
+        parse_notes_field:
             description:
-                - Parse a device's purpose field as YAML and add them as host vars. Purpose
-                  field must start with '---'. Only basic variables are allowed
-                - Purpose-derived vars are set as-is, without a C(libre_) prefix, so they can
+                - Parse a device's Notes field as YAML and add them as host vars. The field
+                  must start with '---'. Only basic variables are allowed
+                - Notes-derived vars are set as-is, without a C(libre_) prefix, so they can
                   be used directly (eg. C(ansible_host), C(ansible_user)). This means a key
                   that collides with a reserved Ansible variable name (eg. C(groups),
                   C(hostvars), C(ansible_connection)) will override that variable for the
-                  host. Devices with untrusted or multi-admin-edited purpose fields should
+                  host. Devices with untrusted or multi-admin-edited notes fields should
                   avoid this option, or admins should be made aware of the risk.
+            type: bool
+            default: false
+        trim_cisco_hardware:
+            description:
+                - Trim the value of the hardware field on Cisco devices to create a more general
+                  value that can be used for grouping hardware families rather than specific
+                  product IDs.
+                - This feature supports ASR, ISR, WS, Catalyst and Nexus hardware values
+                - The C(WS-) prefix on older Catalyst switches is dropped, so that they
+                  group under the same family names as the 9K generation. For example
+                  C(WS-C3850-24T) becomes C(C3850)
+                - For example, a Catalyst 9200CX will show a hardware value like
+                  C(C9200CX-12P-2X2G). Enabling this option would trim the value to C(C9200CX)
             type: bool
             default: false
 """
@@ -159,6 +172,12 @@ group_name_regex_filter:
 # For property-based grouping (os, location, ...) or composed vars (eg. ansible_host,
 # ansible_network_os), add a second inventory source using Ansible's standard
 # `constructed` plugin over this one's output - see the README's Grouping section.
+
+# Enable this to read the Notes value as YAML and derrive additional host vars from it
+parse_notes_field: false
+
+# Enable this to trim the hardware value of Cisco models to a more general value
+trim_cisco_hardware: false
 """
 
 import json
@@ -174,18 +193,22 @@ from ansible.module_utils.common.text.converters import to_text
 from ansible.module_utils.urls import open_url
 from ansible.plugins.inventory import BaseInventoryPlugin, Cacheable
 
+# Cisco hardware families recognised by the 'trim_cisco_hardware' option. Each branch
+# captures the part of the product ID that names the family, so the matching group's
+# name is also the value to return. The WS- prefix is deliberately left out of the
+# capture so older Catalyst kit lands on the same family names as the 9K generation.
+# Order matters: Nexus is tried before bare Catalyst, else C9K-C93180YC gives C9.
+HARDWARE_FAMILY_RE = re.compile(
+    r"(?P<ASR>ASR-?\d+)"
+    r"|(?P<ISR>ISR\d+)"
+    r"|(?P<N>[NC]?\dK-C\d+[A-Z]*)"
+    r"|WS-(?P<WS>C\d+[A-Z]*)"
+    r"|(?P<C>C\d+[A-Z]*)"
+)
+
 
 class InventoryModule(BaseInventoryPlugin, Cacheable):
     NAME = "librenms"
-
-    def _require_inventory(self):
-        # self.inventory is only populated once BaseInventoryPlugin.parse() has run; every
-        # caller of this helper runs from within/after our own parse(), so this should
-        # never actually trigger, it exists to fail loudly instead of with a bare
-        # AttributeError, and to give type checkers a non-Optional value to work with.
-        if self.inventory is None:
-            raise AnsibleError("Inventory data is not initialized; parse() has not run yet.")
-        return self.inventory
 
     # --- HTTP / caching -------------------------------------------------
 
@@ -393,49 +416,74 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
     def _set_host_variables(self, hostname, device):
         """Convert libreNMS API data into Ansible inventory variables. Prefixes 'libre_' to the
-        data field in LibreNMS. Also sets variables taken from the purpose field if that is configured
+        data field in LibreNMS. Also sets variables taken from the notes field if that is configured
         in the plugin file
 
         Args:
             hostname (str): The hostname of the device
             device (dict): The full device dictionary fetched from the API
         """
-        if self.parse_purpose_field and device.get('purpose'):
-            purpose_variables = self._parse_purpose(device.get('purpose'))
-            if purpose_variables is not None:
-                for field, value in purpose_variables.items():
-                    self._require_inventory().set_variable(hostname, field, value)
+
+        # Parse notes if option is enabled
+        if self.parse_notes_field and device.get('notes'):
+            notes_variables = self._parse_notes(device.get('notes'))
+            if notes_variables is not None:
+                for field, value in notes_variables.items():
+                    self.inventory.set_variable(hostname, field, value)
 
         for field, value in device.items():
             if field in self.exclude_fields:
                 continue
-            self._require_inventory().set_variable(hostname, "libre_" + field, value)
+            
+            if self.trim_cisco_hardware and field == 'hardware':
+                value = self._trim_hardware(value).lower()
 
-    def _parse_purpose(self, purpose_value: str):
-        """Parses the LibreNMS purpose field as YAML
+            self.inventory.set_variable(hostname, "libre_" + field, value)
+
+    def _parse_notes(self, notes_value: str):
+        """Parses the LibreNMS notes field as YAML
 
         Args:
-            purpose_value (str): the raw purpose field taken from the API
+            notes_value (str): the raw notes field taken from the API
 
         Returns:
-            parsed_variables(dict): A dictionary of key-value parsed from the purpose field
+            parsed_variables(dict): A dictionary of key-value parsed from the notes field
         """
-        if not purpose_value.splitlines()[0].strip() == '---':
-            self.display.vvv("Purpose field does not start with '---', not parsing")
+        if not notes_value.splitlines()[0].strip() == '---':
+            self.display.vvv("Notes field does not start with '---', not parsing")
             return None
 
         try:
-            parsed = yaml.safe_load(purpose_value)
+            parsed = yaml.safe_load(notes_value)
         except yaml.YAMLError as e:
-            self.display.warning(f"Purpose field is not valid YAML, skipping: {e}")
+            self.display.warning(f"Notes field is not valid YAML, skipping: {e}")
             return None
 
         if not isinstance(parsed, dict):
-            self.display.vvv("Purpose field did not parse into a mapping, skipping")
+            self.display.vvv("Notes field did not parse into a mapping, skipping")
             return None
 
         return parsed
-            
+
+    def _trim_hardware(self, hardware_value):
+        """Trims hardware values from Cisco devices to a more general hardware family
+
+        Args:
+            hardware_value (str): The fetched hardware value which should be trimmed
+
+        Returns:
+            trimmed_value: The trimmed hardware value, or the value unchanged if no
+                supported hardware family could be recognised
+        """
+        if not isinstance(hardware_value, str):
+            return hardware_value
+
+        if (match := HARDWARE_FAMILY_RE.match(hardware_value)):
+            return match.group(match.lastgroup)
+
+        self.display.vvv(f"Failed to parse hardware value: {hardware_value}")
+        return hardware_value
+
     # --- Grouping -----------------------------------------------------
 
     def _add_host_to_device_groups(self, device_id, hostname, membership):
@@ -448,9 +496,9 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         """
         for group_name in membership.get(device_id, []):
             # Let Ansible transform the LibreNMS group name
-            transformed_group_name = self._require_inventory().add_group(group_name)
+            transformed_group_name = self.inventory.add_group(group_name)
             # Add the host to the group
-            self._require_inventory().add_host(group=transformed_group_name, host=hostname)
+            self.inventory.add_host(group=transformed_group_name, host=hostname)
 
     # --- Main flow ------------------------------------------------------
 
@@ -475,7 +523,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             hostname = self._derive_hostname(device)
 
             # Add the host to the dynamic inventory
-            self._require_inventory().add_host(hostname)
+            self.inventory.add_host(hostname)
 
             # Set the host's variables
             self._set_host_variables(hostname, device)
@@ -522,7 +570,8 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         self.hostname_field = self.get_option("hostname_field")
         self.device_groups_as_ansible_groups = self.get_option("device_groups_as_ansible_groups")
-        self.parse_purpose_field = self.get_option("parse_purpose_field")
+        self.parse_notes_field = self.get_option("parse_notes_field")
+        self.trim_cisco_hardware = self.get_option("trim_cisco_hardware")
 
         self.cache_force_update = self.get_option("cache_force_update")
         self.use_cache = cache
