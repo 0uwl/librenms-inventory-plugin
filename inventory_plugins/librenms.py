@@ -136,17 +136,35 @@ DOCUMENTATION = r"""
                   avoid this option, or admins should be made aware of the risk.
             type: bool
             default: false
-        trim_cisco_hardware:
+        hardware_trimming_patterns:
             description:
-                - Trim the value of the hardware field on Cisco devices to create a more general
-                  value that can be used for grouping hardware families rather than specific
-                  product IDs.
-                - This feature supports ASR, ISR, WS, Catalyst and Nexus hardware values
-                - The C(WS-) prefix on older Catalyst switches is dropped, so that they
-                  group under the same family names as the 9K generation. For example
-                  C(WS-C3850-24T) becomes C(C3850)
-                - For example, a Catalyst 9200CX will show a hardware value like
-                  C(C9200CX-12P-2X2G). Enabling this option would trim the value to C(C9200CX)
+                - Trim the C(hardware) field down to a more general product family, so hosts
+                  can be grouped by family instead of by exact product ID.
+                - A mapping of LibreNMS C(os) value (eg. C(ios), C(nxos)) to a list of regular
+                  expressions. For each device the patterns listed under its own C(os) are
+                  tried in order and the first one to match wins. Devices whose C(os) has no
+                  entry are left alone, as are values that match none of its patterns.
+                - Patterns are anchored at the start of the value. If a pattern contains a
+                  capture group the first group becomes the new value, otherwise the whole
+                  match does. The capture group is what lets a pattern drop a prefix - a
+                  pattern of '^WS-(C\d+[A-Z]*)' turns C(WS-C3850-24T) into C(c3850),
+                  grouping older Catalyst switches under the same names as the 9K
+                  generation.
+                - An invalid regular expression fails the inventory run immediately, naming
+                  the offending pattern.
+                - Trimmed values keep the casing of the value LibreNMS reported. See
+                  C(lowercase_hardware) to normalise them.
+            type: dict
+            default: {}
+        lowercase_hardware:
+            description:
+                - Lowercase the C(hardware) field, so that it is safe to use directly in
+                  group names without a Jinja filter on the consuming side.
+                - Applies to every device that reports a hardware value, whether or not it
+                  was trimmed by C(hardware_trimming_patterns). Trimming runs first.
+                - Enable this alongside trimming when grouping on hardware, otherwise
+                  devices whose C(os) has no patterns keep their original casing and end up
+                  in differently-cased groups from the ones that were trimmed.
             type: bool
             default: false
 """
@@ -176,8 +194,18 @@ group_name_regex_filter:
 # Enable this to read the Notes value as YAML and derrive additional host vars from it
 parse_notes_field: false
 
-# Enable this to trim the hardware value of Cisco models to a more general value
-trim_cisco_hardware: false
+# Trim the hardware value down to a product family, per LibreNMS os. Order matters
+# within a list - the first pattern to match wins.
+hardware_trimming_patterns:
+  ios: &cisco_catalyst
+    - '^WS-(C\d+[A-Z]*)'
+    - '^C\d+[A-Z]*'
+  iosxe: *cisco_catalyst
+  nxos:
+    - '^[NC]?\dK-C\d+[A-Z]*'
+
+# Lowercase the hardware value so it can be used directly in group names
+lowercase_hardware: true
 """
 
 import json
@@ -192,19 +220,6 @@ from ansible.errors import AnsibleError
 from ansible.module_utils.common.text.converters import to_text
 from ansible.module_utils.urls import open_url
 from ansible.plugins.inventory import BaseInventoryPlugin, Cacheable
-
-# Cisco hardware families recognised by the 'trim_cisco_hardware' option. Each branch
-# captures the part of the product ID that names the family, so the matching group's
-# name is also the value to return. The WS- prefix is deliberately left out of the
-# capture so older Catalyst kit lands on the same family names as the 9K generation.
-# Order matters: Nexus is tried before bare Catalyst, else C9K-C93180YC gives C9.
-HARDWARE_FAMILY_RE = re.compile(
-    r"(?P<ASR>ASR-?\d+)"
-    r"|(?P<ISR>ISR\d+)"
-    r"|(?P<N>[NC]?\dK-C\d+[A-Z]*)"
-    r"|WS-(?P<WS>C\d+[A-Z]*)"
-    r"|(?P<C>C\d+[A-Z]*)"
-)
 
 
 class InventoryModule(BaseInventoryPlugin, Cacheable):
@@ -435,8 +450,11 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             if field in self.exclude_fields:
                 continue
             
-            if self.trim_cisco_hardware and field == 'hardware':
-                value = self._trim_hardware(value)
+            if field == 'hardware':
+                if self.hardware_trimming_patterns:
+                    value = self._trim_hardware(value, device.get('os'))
+                if self.lowercase_hardware and isinstance(value, str):
+                    value = value.lower()
 
             self.inventory.set_variable(hostname, "libre_" + field, value)
 
@@ -445,51 +463,84 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         Args:
             notes_value (str): the raw notes field taken from the API
-            notes_value (str): the raw notes field taken from the API
 
         Returns:
             parsed_variables(dict): A dictionary of key-value parsed from the notes field
-            parsed_variables(dict): A dictionary of key-value parsed from the notes field
         """
-        if not notes_value.splitlines()[0].strip() == '---':
-            self.display.vvv("Notes field does not start with '---', not parsing")
         if not notes_value.splitlines()[0].strip() == '---':
             self.display.vvv("Notes field does not start with '---', not parsing")
             return None
 
         try:
             parsed = yaml.safe_load(notes_value)
-            parsed = yaml.safe_load(notes_value)
         except yaml.YAMLError as e:
-            self.display.warning(f"Notes field is not valid YAML, skipping: {e}")
             self.display.warning(f"Notes field is not valid YAML, skipping: {e}")
             return None
 
         if not isinstance(parsed, dict):
             self.display.vvv("Notes field did not parse into a mapping, skipping")
-            self.display.vvv("Notes field did not parse into a mapping, skipping")
             return None
 
         return parsed
 
-    def _trim_hardware(self, hardware_value):
-        """Trims hardware values from Cisco devices to a more general hardware family
+    def _compile_trimming_patterns(self, configured):
+        """Validates the hardware_trimming_patterns option and pre-compiles its patterns
+
+        Ansible only checks that the option is a dict, so the shape of the values is
+        checked here. Compiling up front means a bad pattern fails the run immediately,
+        naming itself, rather than part way through building the host list.
 
         Args:
-            hardware_value (str): The fetched hardware value which should be trimmed
+            configured (dict): The raw option value, keyed on LibreNMS os
 
         Returns:
-            trimmed_value: The trimmed hardware value, or the value unchanged if no
-                supported hardware family could be recognised
+            compiled (dict): Lowercased os mapped to its list of compiled patterns
+        """
+        compiled = {}
+
+        for os_name, patterns in (configured or {}).items():
+            if not isinstance(patterns, list):
+                raise AnsibleError(
+                    f"hardware_trimming_patterns['{os_name}'] must be a list of regular "
+                    f"expressions, got {type(patterns).__name__}."
+                )
+
+            for pattern in patterns:
+                try:
+                    compiled.setdefault(str(os_name).lower(), []).append(re.compile(pattern))
+                except (re.error, TypeError) as e:
+                    raise AnsibleError(
+                        f"hardware_trimming_patterns['{os_name}'] contains an invalid "
+                        f"regular expression {pattern!r}: {e}"
+                    ) from e
+
+        return compiled
+
+    def _trim_hardware(self, hardware_value, os_name):
+        """Trims a hardware value down to the product family configured for the device's os
+
+        Args:
+            hardware_value (str): The hardware value as reported by LibreNMS
+            os_name (str): The device's LibreNMS os, which selects the pattern list
+
+        Returns:
+            trimmed_value: The trimmed value, or the value unchanged when the device's os
+                has no patterns configured or none of them match
         """
         if not isinstance(hardware_value, str):
             return hardware_value
 
-        if (match := HARDWARE_FAMILY_RE.match(hardware_value)):
-            if match.lastgroup is not None:
-                return match.group(match.lastgroup).lower()
+        patterns = self.hardware_trimming_patterns.get(str(os_name).lower())
+        if not patterns:
+            return hardware_value
 
-        self.display.vvv(f"Failed to parse hardware value: {hardware_value}")
+        for pattern in patterns:
+            if (match := pattern.match(hardware_value)):
+                # A capture group lets a pattern drop a prefix, eg. the WS- on older
+                # Catalyst switches. Without one, the whole match names the family.
+                return match.group(1) if pattern.groups else match.group(0)
+
+        self.display.vvv(f"No hardware pattern matched: {hardware_value}")
         return hardware_value
 
     # --- Grouping -----------------------------------------------------
@@ -579,7 +630,10 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         self.hostname_field = self.get_option("hostname_field")
         self.device_groups_as_ansible_groups = self.get_option("device_groups_as_ansible_groups")
         self.parse_notes_field = self.get_option("parse_notes_field")
-        self.trim_cisco_hardware = self.get_option("trim_cisco_hardware")
+        self.hardware_trimming_patterns = self._compile_trimming_patterns(
+            self.get_option("hardware_trimming_patterns")
+        )
+        self.lowercase_hardware = self.get_option("lowercase_hardware")
 
         self.cache_force_update = self.get_option("cache_force_update")
         self.use_cache = cache

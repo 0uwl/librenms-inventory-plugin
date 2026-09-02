@@ -75,6 +75,76 @@ Anything derived from those fields - e.g. `ansible_host` from `libre_hostname`, 
 `ansible_network_os` translated from `libre_os` (`iosxe` -> `ios`) - is left to a chained
 `constructed` inventory source's `compose` option; see [Grouping](#grouping).
 
+## Trimming hardware to a product family
+
+`libre_hardware` is the exact product ID LibreNMS discovered - `C9300-48P`,
+`WS-C3850-24T`, `N9K-C93180YC-EX`. Some might thing that is too specific to 
+group on: two switches of the same family land in different groups because their port
+counts differ.
+
+The plugin option `hardware_trimming_patterns` maps a LibreNMS `os` to a list of regular 
+expressions. For each device the patterns under its own `os` are tried in order and the 
+first match wins; devices whose `os` has no entry are left alone. The option is off until 
+you set it.
+
+```yaml
+# librenms.yml
+hardware_trimming_patterns:
+  ios: &cisco_catalyst
+    - '^WS-(C\d+[A-Z]*)'
+    - '^C\d+[A-Z]*'
+  iosxe: *cisco_catalyst
+  nxos:
+    - '^[NC]?\dK-C\d+[A-Z]*'
+```
+
+| `libre_hardware` | `os` | becomes |
+| --- | --- | --- |
+| `C9300-48P` | `iosxe` | `C9300` |
+| `C9200CX-12P-2X2G` | `iosxe` | `C9200CX` |
+| `WS-C3850-24T` | `ios` | `C3850` |
+| `N9K-C93180YC-EX` | `nxos` | `N9K-C93180YC` |
+
+Two things to know when writing patterns:
+
+- **A capture group drops what precedes it.** Without a group the whole match becomes the
+  value; with one, only the first group does. That is how `^WS-(C\d+[A-Z]*)` puts older
+  Catalyst switches under `c3850` rather than a `ws-c3850` namespace of their own.
+- **Order matters.** Patterns are tried top to bottom, so put the specific ones first.
+  Under `nxos`, `^C\d+[A-Z]*` before `^[NC]?\dK-C\d+[A-Z]*` would trim `C9K-C93180YC` to
+  `C9` rather than `C9K-C93180YC`.
+
+Keying on `os` rather than a vendor is deliberate: LibreNMS always populates `os`, and it
+already separates Catalyst from Nexus, whose product IDs need different patterns. Use a
+YAML anchor, as above, when several `os` values share a list. Nothing here is
+Cisco-specific - `junos: ['^EX\d+']` trims `EX4300-48T` to `EX4300`.
+
+An invalid regular expression fails the inventory run immediately and names the pattern,
+rather than silently skipping devices.
+
+### Lowercasing
+
+Trimming keeps the casing LibreNMS reported. `lowercase_hardware` lowercases
+`libre_hardware` so it can be dropped straight into a group name without a Jinja filter
+on the consuming side:
+
+```yaml
+# librenms.yml
+lowercase_hardware: true
+```
+
+```yaml
+# constructed.yml
+keyed_groups:
+  - key: libre_hardware
+    prefix: hw          # -> hw_c9300, hw_n9k_c93180yc
+```
+
+It applies to every device that reports a hardware value, trimmed or not, and trimming
+runs first. Enable it alongside trimming when you group on hardware: devices whose `os`
+has no patterns would otherwise keep their original casing and land in differently-cased
+groups from the ones that were trimmed.
+
 ## Sensitive fields
 
 LibreNMS' device API returns some fields in plaintext that most people would consider

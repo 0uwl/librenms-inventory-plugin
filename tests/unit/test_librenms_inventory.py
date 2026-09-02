@@ -278,77 +278,124 @@ class TestFiltering(LibrenmsInventoryTestCase):
 
         self.assertEqual(set(inventory.hosts.keys()), {"core-sw1", "core-sw2"})
 
-    def test_trim_hardware_asr(self):
+class TestHardwareTrimming(LibrenmsInventoryTestCase):
+    # Keyed on the LibreNMS os rather than a vendor, since os is always populated and
+    # already separates Catalyst from Nexus, whose product IDs need different patterns.
+    PATTERNS = {
+        "ios": [r"^WS-(C\d+[A-Z]*)", r"^C\d+[A-Z]*"],
+        "iosxe": [r"^ASR-?\d+", r"^ISR\d+", r"^C\d+[A-Z]*"],
+        "nxos": [r"^[NC]?\dK-C\d+[A-Z]*"],
+    }
+
+    def trimmed_hardware(self, patterns=None, **overrides):
+        """Run the plugin over the hardware fixture and return {hostname: libre_hardware}"""
         routes = dict(DEFAULT_ROUTES)
         routes["/devices"] = "devices_hardware.json"
+        if patterns is not None:
+            overrides["hardware_trimming_patterns"] = patterns
 
-        _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
+        _, inventory = self.build_plugin(routes=routes, **overrides)
 
-        host_vars = inventory.get_host("core-sw4").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "asr-920")
+        return {
+            hostname: inventory.get_host(hostname).get_vars()["libre_hardware"]
+            for hostname in inventory.hosts
+        }
 
-    def test_trim_hardware_isr(self):
-        routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_hardware.json"
+    def test_each_os_is_trimmed_with_its_own_patterns(self):
+        self.assertEqual(
+            self.trimmed_hardware(self.PATTERNS),
+            {
+                "core-sw1": "C9300",
+                "core-sw2": "N9K-C93180YC",
+                "core-sw3": "C3850",
+                "core-sw4": "ASR-920",
+                "core-sw5": "ISR4321",
+                "core-sw6": "C9200CX",
+                # LibreNMS could not identify the hardware
+                "core-sw7": None,
+                # junos has no patterns configured, so it is left alone
+                "edge-sw1": "EX4300-48T",
+            },
+        )
 
-        _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
+    def test_capture_group_drops_the_prefix(self):
+        # ^WS-(C\d+[A-Z]*) keeps only the group, so older Catalyst switches land on the
+        # same family names as the 9K generation instead of on a WS- namespace of
+        # their own.
+        hardware = self.trimmed_hardware({"ios": [r"^WS-(C\d+[A-Z]*)"]})
 
-        host_vars = inventory.get_host("core-sw5").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "isr4321")
+        self.assertEqual(hardware["core-sw3"], "C3850")
 
-    def test_trim_hardware_c(self):
-        routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_hardware.json"
+    def test_first_matching_pattern_wins(self):
+        hardware = self.trimmed_hardware({"iosxe": [r"^(C9)\d+", r"^C\d+[A-Z]*"]})
 
-        _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
+        self.assertEqual(hardware["core-sw1"], "C9")
 
-        host_vars = inventory.get_host("core-sw1").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "c9300")
+    def test_os_key_is_matched_case_insensitively(self):
+        hardware = self.trimmed_hardware({"IOSXE": [r"^C\d+[A-Z]*"]})
 
-    def test_trim_hardware_ws(self):
-        routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_hardware.json"
+        self.assertEqual(hardware["core-sw1"], "C9300")
 
-        _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
+    def test_non_cisco_hardware_can_be_trimmed(self):
+        hardware = self.trimmed_hardware({"junos": [r"^EX\d+"]})
 
-        host_vars = inventory.get_host("core-sw3").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "c3850")
+        self.assertEqual(hardware["edge-sw1"], "EX4300")
 
-    def test_trim_hardware_n(self):
-        routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_hardware.json"
+    def test_value_is_untouched_when_no_pattern_matches(self):
+        hardware = self.trimmed_hardware({"junos": [r"^SRX\d+"]})
 
-        _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
-
-        host_vars = inventory.get_host("core-sw2").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "n9k-c93180yc")
-
-    def test_trim_hardware_keeps_letter_suffix(self):
-        routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_hardware.json"
-
-        _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
-
-        host_vars = inventory.get_host("core-sw6").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "c9200cx")
-
-    def test_trim_hardware_tolerates_missing_hardware(self):
-        routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_hardware.json"
-
-        _, inventory = self.build_plugin(routes=routes, trim_cisco_hardware=True)
-
-        host_vars = inventory.get_host("core-sw7").get_vars()
-        self.assertIsNone(host_vars['libre_hardware'])
+        self.assertEqual(hardware["edge-sw1"], "EX4300-48T")
 
     def test_hardware_untouched_by_default(self):
-        routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_hardware.json"
+        hardware = self.trimmed_hardware()
 
-        _, inventory = self.build_plugin(routes=routes)
+        self.assertEqual(hardware["core-sw1"], "C9300-48P")
+        self.assertEqual(hardware["core-sw3"], "WS-C3850-24T")
 
-        host_vars = inventory.get_host("core-sw1").get_vars()
-        self.assertEqual(host_vars['libre_hardware'], "c9300")
+    def test_missing_hardware_is_tolerated(self):
+        hardware = self.trimmed_hardware(self.PATTERNS)
+
+        self.assertIsNone(hardware["core-sw7"])
+
+    def test_invalid_pattern_is_rejected(self):
+        bad_pattern = r"^C(9\d+"
+
+        with self.assertRaises(AnsibleError) as raised:
+            self.trimmed_hardware({"ios": [r"^C\d+", bad_pattern]})
+
+        message = str(raised.exception)
+        self.assertIn("invalid regular expression", message)
+        # the offending pattern must be named, otherwise it is unfindable in a big config
+        self.assertIn(repr(bad_pattern), message)
+
+    def test_patterns_must_be_a_list(self):
+        with self.assertRaises(AnsibleError) as raised:
+            self.trimmed_hardware({"ios": r"^C\d+"})
+
+        self.assertIn("must be a list", str(raised.exception))
+
+    def test_lowercase_hardware_normalises_trimmed_values(self):
+        hardware = self.trimmed_hardware(self.PATTERNS, lowercase_hardware=True)
+
+        self.assertEqual(hardware["core-sw1"], "c9300")
+        self.assertEqual(hardware["core-sw2"], "n9k-c93180yc")
+
+    def test_lowercase_hardware_also_applies_to_untrimmed_values(self):
+        # junos has no patterns, so without this the trimmed and untrimmed devices would
+        # end up in differently-cased groups
+        hardware = self.trimmed_hardware(self.PATTERNS, lowercase_hardware=True)
+
+        self.assertEqual(hardware["edge-sw1"], "ex4300-48t")
+
+    def test_lowercase_hardware_works_without_any_patterns(self):
+        hardware = self.trimmed_hardware(lowercase_hardware=True)
+
+        self.assertEqual(hardware["core-sw1"], "c9300-48p")
+
+    def test_lowercase_hardware_tolerates_missing_hardware(self):
+        hardware = self.trimmed_hardware(self.PATTERNS, lowercase_hardware=True)
+
+        self.assertIsNone(hardware["core-sw7"])
 
 
 class TestGrouping(LibrenmsInventoryTestCase):
