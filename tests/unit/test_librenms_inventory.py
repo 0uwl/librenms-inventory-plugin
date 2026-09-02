@@ -287,8 +287,8 @@ class TestHardwareTrimming(LibrenmsInventoryTestCase):
         "nxos": [r"^[NC]?\dK-C\d+[A-Z]*"],
     }
 
-    def trimmed_hardware(self, patterns=None, **overrides):
-        """Run the plugin over the hardware fixture and return {hostname: libre_hardware}"""
+    def host_vars(self, patterns=None, **overrides):
+        """Run the plugin over the hardware fixture and return {hostname: host vars}"""
         routes = dict(DEFAULT_ROUTES)
         routes["/devices"] = "devices_hardware.json"
         if patterns is not None:
@@ -297,8 +297,23 @@ class TestHardwareTrimming(LibrenmsInventoryTestCase):
         _, inventory = self.build_plugin(routes=routes, **overrides)
 
         return {
-            hostname: inventory.get_host(hostname).get_vars()["libre_hardware"]
+            hostname: inventory.get_host(hostname).get_vars()
             for hostname in inventory.hosts
+        }
+
+    def trimmed_hardware(self, patterns=None, **overrides):
+        """{hostname: libre_hardware} over the hardware fixture"""
+        return {
+            hostname: host_vars["libre_hardware"]
+            for hostname, host_vars in self.host_vars(patterns, **overrides).items()
+        }
+
+    def hardware_variants(self, patterns=None, **overrides):
+        """{hostname: libre_hardware_variant} over the hardware fixture, unset hosts omitted"""
+        return {
+            hostname: host_vars["libre_hardware_variant"]
+            for hostname, host_vars in self.host_vars(patterns, **overrides).items()
+            if "libre_hardware_variant" in host_vars
         }
 
     def test_each_os_is_trimmed_with_its_own_patterns(self):
@@ -396,6 +411,50 @@ class TestHardwareTrimming(LibrenmsInventoryTestCase):
         hardware = self.trimmed_hardware(self.PATTERNS, lowercase_hardware=True)
 
         self.assertIsNone(hardware["core-sw7"])
+
+    def test_variant_holds_what_the_pattern_left_behind(self):
+        self.assertEqual(
+            self.hardware_variants(self.PATTERNS),
+            {
+                "core-sw1": "48P",
+                "core-sw2": "EX",
+                "core-sw3": "24T",
+                "core-sw4": "24SZ-M",
+                "core-sw5": "K9",
+                "core-sw6": "12P-2X2G",
+            },
+        )
+
+    def test_variant_excludes_text_the_pattern_consumed(self):
+        # ^WS-(C\d+[A-Z]*) drops the WS- deliberately, so it belongs to neither var
+        host_vars = self.host_vars({"ios": [r"^WS-(C\d+[A-Z]*)"]})["core-sw3"]
+
+        self.assertEqual(host_vars["libre_hardware"], "C3850")
+        self.assertEqual(host_vars["libre_hardware_variant"], "24T")
+
+    def test_variant_is_unset_when_the_pattern_consumes_everything(self):
+        variants = self.hardware_variants({"iosxe": [r"^C\d+[A-Z]*-\d+P$"]})
+
+        self.assertNotIn("core-sw1", variants)
+
+    def test_variant_is_unset_without_trimming(self):
+        self.assertEqual(self.hardware_variants(), {})
+
+    def test_variant_is_unset_when_no_pattern_matches(self):
+        variants = self.hardware_variants({"junos": [r"^SRX\d+"]})
+
+        self.assertNotIn("edge-sw1", variants)
+
+    def test_variant_is_lowercased_with_the_hardware_value(self):
+        variants = self.hardware_variants(self.PATTERNS, lowercase_hardware=True)
+
+        self.assertEqual(variants["core-sw1"], "48p")
+        self.assertEqual(variants["core-sw4"], "24sz-m")
+
+    def test_variant_is_unset_when_hardware_is_excluded(self):
+        variants = self.hardware_variants(self.PATTERNS, exclude_fields=["hardware"])
+
+        self.assertEqual(variants, {})
 
 
 class TestGrouping(LibrenmsInventoryTestCase):

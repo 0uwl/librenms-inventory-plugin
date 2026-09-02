@@ -71,6 +71,10 @@ Every field returned by the LibreNMS API for a device is set as a `libre_<field>
 host var (e.g. `libre_hardware`, `libre_os`, `libre_location`), except for the fields
 listed in `exclude_fields` (see [Sensitive fields](#sensitive-fields) below).
 
+One host var is derived rather than reported: `libre_hardware_variant`, set only when
+[hardware trimming](#trimming-hardware-to-a-product-family) is configured and leaves
+something behind.
+
 Anything derived from those fields - e.g. `ansible_host` from `libre_hostname`, or
 `ansible_network_os` translated from `libre_os` (`iosxe` -> `ios`) - is left to a chained
 `constructed` inventory source's `compose` option; see [Grouping](#grouping).
@@ -98,18 +102,19 @@ hardware_trimming_patterns:
     - '^[NC]?\dK-C\d+[A-Z]*'
 ```
 
-| `libre_hardware` | `os` | becomes |
-| --- | --- | --- |
-| `C9300-48P` | `iosxe` | `C9300` |
-| `C9200CX-12P-2X2G` | `iosxe` | `C9200CX` |
-| `WS-C3850-24T` | `ios` | `C3850` |
-| `N9K-C93180YC-EX` | `nxos` | `N9K-C93180YC` |
+| reported hardware | `os` | `libre_hardware` | `libre_hardware_variant` |
+| --- | --- | --- | --- |
+| `C9300-48P` | `iosxe` | `C9300` | `48P` |
+| `C9200CX-12P-2X2G` | `iosxe` | `C9200CX` | `12P-2X2G` |
+| `WS-C3850-24T` | `ios` | `C3850` | `24T` |
+| `N9K-C93180YC-EX` | `nxos` | `N9K-C93180YC` | `EX` |
+| `N7K-C7010` | `nxos` | `N7K-C7010` | *(unset)* |
 
 Two things to know when writing patterns:
 
 - **A capture group drops what precedes it.** Without a group the whole match becomes the
   value; with one, only the first group does. That is how `^WS-(C\d+[A-Z]*)` puts older
-  Catalyst switches under `c3850` rather than a `ws-c3850` namespace of their own.
+  Catalyst switches under `C3850` rather than a `WS-C3850` namespace of their own.
 - **Order matters.** Patterns are tried top to bottom, so put the specific ones first.
   Under `nxos`, `^C\d+[A-Z]*` before `^[NC]?\dK-C\d+[A-Z]*` would trim `C9K-C93180YC` to
   `C9` rather than `C9K-C93180YC`.
@@ -121,6 +126,30 @@ Cisco-specific - `junos: ['^EX\d+']` trims `EX4300-48T` to `EX4300`.
 
 An invalid regular expression fails the inventory run immediately and names the pattern,
 rather than silently skipping devices.
+
+### The variant
+
+Whatever a pattern leaves behind is set as `libre_hardware_variant`, so the detail you
+trimmed away is still available per host - port counts, uplink types, `/K9` licensing
+suffixes:
+
+```yaml
+# constructed.yml
+compose:
+  # e.g. "C9300 (48P)"
+  hardware_description: >-
+    libre_hardware ~ (' (' ~ libre_hardware_variant ~ ')'
+    if libre_hardware_variant is defined else '')
+```
+
+The separator the pattern broke on is stripped, so `C9300-48P` gives `48P` rather than
+`-48P`. Text a pattern *consumed* is not part of the variant: `^WS-(C\d+[A-Z]*)` matches
+the `WS-` and discards it, so it appears in neither variable.
+
+The variable is left unset - not empty, not `None` - for devices whose product ID is only
+a family (`N7K-C7010`), for devices whose `os` has no patterns, and when trimming is off
+entirely. That way `keyed_groups` on the variant cannot invent a group for devices that
+do not have one. Guard with `is defined` in templates, as above.
 
 ### Lowercasing
 
@@ -140,8 +169,8 @@ keyed_groups:
     prefix: hw          # -> hw_c9300, hw_n9k_c93180yc
 ```
 
-It applies to every device that reports a hardware value, trimmed or not, and trimming
-runs first. Enable it alongside trimming when you group on hardware: devices whose `os`
+It applies to every device that reports a hardware value, trimmed or not, and to
+`libre_hardware_variant` where that is set. Trimming runs first. Enable it alongside trimming when you group on hardware: devices whose `os`
 has no patterns would otherwise keep their original casing and land in differently-cased
 groups from the ones that were trimmed.
 

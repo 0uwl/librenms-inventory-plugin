@@ -152,6 +152,12 @@ DOCUMENTATION = r"""
                   generation.
                 - An invalid regular expression fails the inventory run immediately, naming
                   the offending pattern.
+                - Whatever a pattern leaves behind is set as C(libre_hardware_variant), with
+                  the separator it broke on stripped, eg. C(C9300-48P) becomes a
+                  C(libre_hardware) of C(C9300) and a C(libre_hardware_variant) of C(48P).
+                  Text a pattern consumed without capturing is not part of the variant, so
+                  a dropped prefix stays dropped. The variable is left unset for devices
+                  with nothing left over, and for devices that were not trimmed at all.
                 - Trimmed values keep the casing of the value LibreNMS reported. See
                   C(lowercase_hardware) to normalise them.
             type: dict
@@ -161,7 +167,8 @@ DOCUMENTATION = r"""
                 - Lowercase the C(hardware) field, so that it is safe to use directly in
                   group names without a Jinja filter on the consuming side.
                 - Applies to every device that reports a hardware value, whether or not it
-                  was trimmed by C(hardware_trimming_patterns). Trimming runs first.
+                  was trimmed by C(hardware_trimming_patterns), and to
+                  C(libre_hardware_variant) where that is set. Trimming runs first.
                 - Enable this alongside trimming when grouping on hardware, otherwise
                   devices whose C(os) has no patterns keep their original casing and end up
                   in differently-cased groups from the ones that were trimmed.
@@ -449,14 +456,38 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         for field, value in device.items():
             if field in self.exclude_fields:
                 continue
-            
+
             if field == 'hardware':
-                if self.hardware_trimming_patterns:
-                    value = self._trim_hardware(value, device.get('os'))
-                if self.lowercase_hardware and isinstance(value, str):
-                    value = value.lower()
+                self._set_hardware_variables(hostname, device, value)
+                continue
 
             self.inventory.set_variable(hostname, "libre_" + field, value)
+
+    def _set_hardware_variables(self, hostname, device, hardware_value):
+        """Sets libre_hardware, and libre_hardware_variant when trimming leaves a remainder
+
+        Args:
+            hostname (str): The hostname of the device
+            device (dict): The full device dictionary fetched from the API
+            hardware_value: The device's raw hardware value, as reported by LibreNMS
+        """
+        variant = None
+
+        if self.hardware_trimming_patterns:
+            hardware_value, variant = self._trim_hardware(hardware_value, device.get('os'))
+
+        if self.lowercase_hardware:
+            if isinstance(hardware_value, str):
+                hardware_value = hardware_value.lower()
+            if variant is not None:
+                variant = variant.lower()
+
+        self.inventory.set_variable(hostname, "libre_hardware", hardware_value)
+
+        # Left unset rather than set to None, so that a device whose product ID is only a
+        # family does not end up in a group of its own when keyed on the variant.
+        if variant is not None:
+            self.inventory.set_variable(hostname, "libre_hardware_variant", variant)
 
     def _parse_notes(self, notes_value: str):
         """Parses the LibreNMS notes field as YAML
@@ -517,31 +548,38 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         return compiled
 
     def _trim_hardware(self, hardware_value, os_name):
-        """Trims a hardware value down to the product family configured for the device's os
+        """Splits a hardware value into its product family and the variant that follows it
 
         Args:
             hardware_value (str): The hardware value as reported by LibreNMS
             os_name (str): The device's LibreNMS os, which selects the pattern list
 
         Returns:
-            trimmed_value: The trimmed value, or the value unchanged when the device's os
-                has no patterns configured or none of them match
+            (family, variant): The trimmed value and whatever the pattern left behind, the
+                latter being None when nothing is left over. When the device's os has no
+                patterns configured, or none of them match, the value is returned unchanged
+                with no variant.
         """
         if not isinstance(hardware_value, str):
-            return hardware_value
+            return hardware_value, None
 
         patterns = self.hardware_trimming_patterns.get(str(os_name).lower())
         if not patterns:
-            return hardware_value
+            return hardware_value, None
 
         for pattern in patterns:
             if (match := pattern.match(hardware_value)):
                 # A capture group lets a pattern drop a prefix, eg. the WS- on older
                 # Catalyst switches. Without one, the whole match names the family.
-                return match.group(1) if pattern.groups else match.group(0)
+                family = match.group(1) if pattern.groups else match.group(0)
+                # Whatever the pattern did not consume is the variant. The separator it
+                # broke on is an artefact of where the boundary fell, not part of the
+                # value, so it is stripped.
+                variant = hardware_value[match.end():].lstrip("-/_ ") or None
+                return family, variant
 
         self.display.vvv(f"No hardware pattern matched: {hardware_value}")
-        return hardware_value
+        return hardware_value, None
 
     # --- Grouping -----------------------------------------------------
 
