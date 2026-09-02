@@ -162,9 +162,6 @@ group_name_regex_filter:
 
 # Enable this to read the Notes value as YAML and derrive additional host vars from it
 parse_notes_field: true
-
-# Enable this to trim the hardware string for Cisco models
-trim_cisco_hardware
 """
 
 import json
