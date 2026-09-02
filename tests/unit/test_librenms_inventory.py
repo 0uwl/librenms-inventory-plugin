@@ -192,9 +192,9 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
         self.assertEqual(host_vars["libre_authpass"], "authsecret")
         self.assertEqual(host_vars["libre_cryptopass"], "cryptosecret")
         
-    def test_purpose_field_ignored_by_default(self):
+    def test_notes_field_ignored_by_default(self):
         routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_purpose.json"
+        routes["/devices"] = "devices_notes.json"
 
         _, inventory = self.build_plugin(routes=routes)
 
@@ -203,61 +203,61 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
         self.assertNotIn("var2", host_vars)
         self.assertNotIn("var3", host_vars)
 
-    def test_parse_purpose_field(self):
+    def test_parse_notes_field(self):
         routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_purpose.json"
+        routes["/devices"] = "devices_notes.json"
 
-        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+        _, inventory = self.build_plugin(routes=routes, parse_notes_field=True)
 
         host_vars = inventory.get_host("custom-sw1").get_vars()
         self.assertTrue(host_vars["var1"])
         self.assertFalse(host_vars["var2"])
         self.assertEqual(host_vars["var3"], "test")
 
-    def test_purpose_no_parse_without_leading_yaml_prefix(self):
+    def test_notes_no_parse_without_leading_yaml_prefix(self):
         routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_purpose.json"
+        routes["/devices"] = "devices_notes.json"
 
-        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+        _, inventory = self.build_plugin(routes=routes, parse_notes_field=True)
 
         host_vars = inventory.get_host("custom-sw2").get_vars()
         self.assertIsNone(host_vars.get("var1"))
         self.assertIsNone(host_vars.get("var2"))
         self.assertIsNone(host_vars.get("var3"))
 
-    def test_purpose_no_parse_non_dict(self):
+    def test_notes_no_parse_non_dict(self):
         routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_purpose.json"
+        routes["/devices"] = "devices_notes.json"
 
-        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+        _, inventory = self.build_plugin(routes=routes, parse_notes_field=True)
 
         host_vars = inventory.get_host("custom-fw1").get_vars()
         self.assertIsNone(host_vars.get("hello"))
 
-    def test_purpose_field_supports_nested_lists_and_dicts(self):
+    def test_notes_field_supports_nested_lists_and_dicts(self):
         routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_purpose.json"
+        routes["/devices"] = "devices_notes.json"
 
-        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+        _, inventory = self.build_plugin(routes=routes, parse_notes_field=True)
 
         host_vars = inventory.get_host("custom-sw3").get_vars()
         self.assertEqual(host_vars["a_list"], ["one", "two"])
         self.assertEqual(host_vars["a_dict"], {"nested_key": "nested_value"})
 
-    def test_purpose_field_missing_does_not_crash(self):
+    def test_notes_field_missing_does_not_crash(self):
         routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_purpose.json"
+        routes["/devices"] = "devices_notes.json"
 
-        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+        _, inventory = self.build_plugin(routes=routes, parse_notes_field=True)
 
         host_vars = inventory.get_host("custom-sw4").get_vars()
         self.assertEqual(host_vars["libre_hardware"], "C9300")
 
-    def test_purpose_field_tolerates_trailing_whitespace_on_marker_line(self):
+    def test_notes_field_tolerates_trailing_whitespace_on_marker_line(self):
         routes = dict(DEFAULT_ROUTES)
-        routes["/devices"] = "devices_purpose.json"
+        routes["/devices"] = "devices_notes.json"
 
-        _, inventory = self.build_plugin(routes=routes, parse_purpose_field=True)
+        _, inventory = self.build_plugin(routes=routes, parse_notes_field=True)
 
         host_vars = inventory.get_host("custom-sw5").get_vars()
         self.assertTrue(host_vars["var1"])
@@ -470,7 +470,7 @@ class TestHostnameDerivation(LibrenmsInventoryTestCase):
 
     def test_hostname_field_falls_back_to_uuid_when_empty(self):
         _, inventory = self.build_plugin(
-            hostname_field="purpose",
+            hostname_field="notes",
             exclude_disabled=False,
             exclude_ignored=False,
             host_name_regex_filter=["^old-switch$"],
