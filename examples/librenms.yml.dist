@@ -1,5 +1,9 @@
 # Example command line: ansible-inventory -v --list -i librenms.yml
 # Remember to export LIBRENMS_TOKEN: export LIBRENMS_TOKEN=abc
+#
+# -v reports anything that went wrong, -vvvv reports every step of the run. All of the
+# plugin's messages are prefixed with [librenms], so to follow just this plugin:
+#   ansible-inventory -vvvv --list -i librenms.yml | grep '\[librenms\]'
 plugin: librenms
 api_endpoint: https://librenms-host.local/api/v0
 validate_certs: true

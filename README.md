@@ -314,6 +314,45 @@ and run all sources together:
 ansible-inventory -v --list -i librenms.yml -i constructed.yml
 ```
 
+## Troubleshooting
+
+The plugin reports what it is doing at two verbosity levels, and every message it emits
+is prefixed with `[librenms]` so it can be picked out of Ansible's own output:
+
+```bash
+# -v: only the things that went wrong
+ansible-inventory -v --list -i librenms.yml
+
+# -vvvv: every step of the run, in order
+ansible-inventory -vvvv --list -i librenms.yml | grep '\[librenms\]'
+```
+
+At `-v` the plugin reports problems that quietly degrade the inventory rather than stop
+it, so a run that "worked" but produced the wrong thing explains itself:
+
+| Message | Usual cause |
+| --- | --- |
+| `LibreNMS returned no devices` | `device_status_filter` or `query_filters` matched nothing, or the token cannot see devices |
+| `every device was filtered out` | `exclude_disabled`, `exclude_ignored` or `host_name_regex_filter` is too strict |
+| `group_name_regex_filter matched none of the device groups` | The regexes do not match any LibreNMS device group name |
+| `device <name> has no <field>, naming it <uuid>` | `hostname_field` names a field this device does not have |
+| `api_token did not resolve to a value` | The vault/extra var referenced by `api_token` is not defined |
+| `<host>: notes field is YAML but not a mapping of vars` | The Notes field parses, but not into `key: value` pairs |
+
+At `-vvvv` every step is reported as it happens - options being applied, each API request
+and whether it came from the cache, each device that was skipped and why, the hardware
+family and variant derived for each host, and each group a host was added to.
+
+Failures that stop the run name the option to look at, for example:
+
+```
+Could not reach the LibreNMS API at https://librenms.example.com/api/v0/devices.
+Check api_endpoint, validate_certs and timeout: <urlopen error [Errno -2] Name or service not known>
+
+LibreNMS rejected the API token (HTTP 401): Unauthenticated.
+Check api_token, or the LIBRENMS_TOKEN environment variable.
+```
+
 ## Migrating from mschedrin/librenms-ansible-inventory-plugin
 
 - The plugin file now lives at `inventory_plugins/librenms.py` instead of the repo root.
@@ -366,3 +405,50 @@ device payload, LibreNMS device-group membership
 (including the case where an instance has zero device groups, which some LibreNMS
 versions signal with an HTTP 404 rather than an empty list), and a real `ansible-inventory
 --list` subprocess run.
+
+## Linting
+
+```bash
+pip install -r requirements-dev.txt
+
+ruff check .
+yamllint .github/workflows examples/*.yml.dist
+```
+
+Configuration lives in `ruff.toml` and `.yamllint.yml`. Both files carry the reasoning
+for each ignore, the notable one being that `inventory_plugins/*.py` is exempt from
+`E402` and the pyupgrade rules: an Ansible plugin has to define `DOCUMENTATION` and
+`EXAMPLES` before its imports, and the Python 2 compatibility preamble is conventional
+in plugin modules.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request against `main`, and on pushes to
+`main`. It has three jobs:
+
+| Job | What it checks |
+| --- | --- |
+| **Lint** | `ruff check` over the plugin and tests, `yamllint` over the workflows and the example inventory sources |
+| **Plugin documentation** | `DOCUMENTATION` and `EXAMPLES` parse as YAML, and `ansible-doc -t inventory librenms` renders - a malformed docstring stops Ansible registering the plugin's options at all |
+| **Unit tests** | `tests/unit` on Python 3.12 and 3.13 |
+
+Only the unit tests run in CI. `tests/integration` needs a reachable LibreNMS instance
+and skips itself without one, so running it on a GitHub runner would prove nothing.
+
+CI installs `requirements-dev.txt`, which pins the linter versions, so a clean local run
+means a clean CI run.
+
+### Requiring CI before a merge
+
+The workflow alone does not block merges - that is a repository setting. The jobs
+aggregate into a single `CI` check so only one entry has to be required:
+
+**Settings → Branches → Add branch ruleset**, targeting `main`:
+
+- Enable **Require a pull request before merging**
+- Enable **Require status checks to pass**, and add `CI` as a required check
+- Enable **Block force pushes**
+
+The `CI` job fails if any of Lint, Plugin documentation, or Unit tests fails or is
+cancelled, so requiring it covers all of them - including new matrix entries added
+later, which would otherwise each need adding to the required list by hand.

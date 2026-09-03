@@ -11,6 +11,7 @@ from ansible.errors import AnsibleError
 from ansible.inventory.data import InventoryData
 from ansible.parsing.dataloader import DataLoader
 from ansible.plugins.loader import inventory_loader
+from ansible.utils.display import Display
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "fixtures")
@@ -191,7 +192,7 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
         self.assertEqual(host_vars["libre_community"], "public")
         self.assertEqual(host_vars["libre_authpass"], "authsecret")
         self.assertEqual(host_vars["libre_cryptopass"], "cryptosecret")
-        
+
     def test_notes_field_ignored_by_default(self):
         routes = dict(DEFAULT_ROUTES)
         routes["/devices"] = "devices_notes.json"
@@ -704,6 +705,138 @@ class TestRequestConstruction(LibrenmsInventoryTestCase):
         self.assertEqual(headers["X-Auth-Token"], "test-token")
         self.assertEqual(headers["X-Extra"], "value")
         self.assertEqual(devices_requests[0]["timeout"], 45)
+
+
+class TestDisplayMessages(LibrenmsInventoryTestCase):
+    """The plugin narrates each step at -vvvv and reports degraded runs at -v, so a user
+    can follow what it did without reading the source."""
+
+    def capture_display(self, routes=None, **config_overrides):
+        """Run the plugin and collect what it sent to each Display level
+
+        Returns:
+            (steps, problems, warnings): The -vvvv, -v and warning messages, in order
+        """
+        # Display is a singleton shared by every plugin instance, so patching the class
+        # captures whatever the plugin emits regardless of verbosity.
+        steps, problems, warnings = [], [], []
+        with mock.patch.object(Display, "vvvv", steps.append), \
+                mock.patch.object(Display, "v", problems.append), \
+                mock.patch.object(Display, "warning", warnings.append):
+            self.build_plugin(routes=routes, **config_overrides)
+
+        return steps, problems, warnings
+
+    def test_every_stage_of_a_run_is_reported_at_vvvv(self):
+        steps, _, _ = self.capture_display()
+        joined = "\n".join(steps)
+
+        for expected in (
+            "reading inventory source",
+            "applying options",
+            "api endpoint is",
+            "resolving the api token",
+            "populating the inventory",
+            "fetching devices",
+            "fetching device groups",
+            "adding host core-sw1",
+            "setting host vars for core-sw1",
+            "adding core-sw1 to group Core",
+            "done",
+        ):
+            self.assertIn(expected, joined)
+
+    def test_step_messages_are_prefixed_so_they_can_be_grepped(self):
+        steps, _, _ = self.capture_display()
+
+        self.assertTrue(steps)
+        self.assertTrue(all(m.startswith("[librenms] ") for m in steps), steps)
+
+    def test_excluded_devices_say_why_they_were_skipped(self):
+        steps, _, _ = self.capture_display()
+        joined = "\n".join(steps)
+
+        self.assertIn("skipping \u00e9dge-fw1, it is disabled", joined)
+        self.assertIn("skipping old-switch, it is ignored", joined)
+
+    def test_filtering_every_device_out_is_reported_at_v(self):
+        _, problems, _ = self.capture_display(host_name_regex_filter=["^nothing-matches$"])
+
+        self.assertTrue(any("every device was filtered out" in m for m in problems), problems)
+
+    def test_group_filter_matching_nothing_is_reported_at_v(self):
+        _, problems, _ = self.capture_display(group_name_regex_filter=["^nothing-matches$"])
+
+        self.assertTrue(
+            any("matched none of the device groups" in m for m in problems), problems
+        )
+
+    def test_empty_device_list_is_reported_at_v(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = HttpErrorRoute(
+            404, payload={"status": "error", "message": "No devices found"}
+        )
+
+        _, problems, _ = self.capture_display(routes=routes)
+
+        self.assertTrue(any("returned no devices" in m for m in problems), problems)
+
+    def test_generated_hostname_is_reported_at_v(self):
+        _, problems, _ = self.capture_display(hostname_field="does_not_exist")
+
+        self.assertTrue(
+            any("has no does_not_exist, naming it" in m for m in problems), problems
+        )
+
+    def test_unresolved_api_token_is_reported_at_v(self):
+        _, problems, _ = self.capture_display(api_token="{{ never_defined }}")
+
+        self.assertTrue(
+            any("api_token did not resolve" in m for m in problems), problems
+        )
+
+
+class TestErrorMessages(LibrenmsInventoryTestCase):
+    """Failures that stop the run name the option the user should look at."""
+
+    def test_unreachable_endpoint_names_the_options_to_check(self):
+        plugin = get_plugin_instance()
+        modname = type(plugin).__module__
+
+        def unreachable(url, **kwargs):
+            raise urllib.error.URLError("Name or service not known")
+
+        config_path = write_config()
+        self._configs.append(config_path)
+
+        with mock.patch(modname + ".open_url", unreachable), self.assertRaises(AnsibleError) as raised:
+            plugin.parse(InventoryData(), DataLoader(), config_path, cache=False)
+
+        message = str(raised.exception)
+        self.assertIn("Could not reach the LibreNMS API", message)
+        self.assertIn("api_endpoint", message)
+
+    def test_rejected_token_names_the_token_options(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = HttpErrorRoute(
+            401, payload={"status": "error", "message": "Unauthenticated"}
+        )
+
+        with self.assertRaises(AnsibleError) as raised:
+            self.build_plugin(routes=routes)
+
+        message = str(raised.exception)
+        self.assertIn("rejected the API token", message)
+        self.assertIn("LIBRENMS_TOKEN", message)
+
+    def test_non_json_body_error_names_the_endpoint_option(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = RawResponse(b"<html>not json</html>")
+
+        with self.assertRaises(AnsibleError) as raised:
+            self.build_plugin(routes=routes)
+
+        self.assertIn("api_endpoint", str(raised.exception))
 
 
 if __name__ == "__main__":
