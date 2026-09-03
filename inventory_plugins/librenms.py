@@ -136,6 +136,34 @@ DOCUMENTATION = r"""
                   avoid this option, or admins should be made aware of the risk.
             type: bool
             default: false
+        parse_location_field:
+            description:
+                - Parse a device's C(location) field (LibreNMS' copy of the SNMP
+                  C(sysLocation) value) into site/room/rack/unit host vars, for sites
+                  that encode a device's precise physical position in it.
+                - Expects the fixed format
+                  C(<site>;[<room>];[<rack>];[[<stack_nr>]u<u_nr>];...) - C(site) is
+                  required, C(room) is an optional second field, and everything after
+                  that is read as a sequence of rack names and rack-unit positions. A
+                  segment made up of an optional number then C(u) then a number (eg.
+                  C(u10), C(2u5)) is a unit position; anything else names the rack that
+                  the unit positions after it belong to, until the next rack name. A
+                  rack with no unit position before the next rack (or the end of the
+                  value) is still recorded, on its own. This lets a stack of physically
+                  separate devices reported as one LibreNMS device (eg. C(2u5;3u6))
+                  record where each member sits, across racks if needed.
+                - Sets C(libre_location_site), C(libre_location_room) (when given), and
+                  C(libre_location_positions) - a list of dicts, one per rack and/or
+                  unit position found, each with any of C(rack), C(unit), C(stack_nr)
+                  that were given. A location with no semicolons at all still gets
+                  C(libre_location_site) set to the whole value - that is the minimal
+                  form of the format, not a mismatch.
+                - A location with no site (eg. starting with a C(;)) is skipped with a
+                  warning rather than failing the run, since not every device may use
+                  this scheme.
+                - C(libre_location) itself is never modified - these are additional vars.
+            type: bool
+            default: false
         hardware_trimming_patterns:
             description:
                 - Derive a more general product family from the C(hardware) field, so hosts
@@ -202,6 +230,10 @@ group_name_regex_filter:
 # Enable this to read the Notes value as YAML and derrive additional host vars from it
 parse_notes_field: false
 
+# Parse the location field as <site>;[<room>];[<rack>];[[<stack_nr>]u<u_nr>];... to get
+# libre_location_site/_room/_positions - see the README's Location parsing section.
+parse_location_field: false
+
 # Trim the hardware value down to a product family, per LibreNMS os. Order matters
 # within a list - the first pattern to match wins.
 hardware_trimming_patterns:
@@ -232,6 +264,11 @@ from ansible.plugins.inventory import BaseInventoryPlugin, Cacheable
 
 class InventoryModule(BaseInventoryPlugin, Cacheable):
     NAME = "librenms"
+
+    # A location "unit spec" segment: an optional stack number then a literal 'u' then
+    # the unit number, eg. "u10", "2u5". Anything else non-empty in that position is a
+    # rack name. Fixed, not user-configurable - see parse_location_field.
+    _LOCATION_UNIT_RE = re.compile(r"^(?P<stack_nr>\d+)?[uU](?P<unit>\d+)$")
 
     # --- Logging ---------------------------------------------------------
 
@@ -593,6 +630,15 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 for field, value in notes_variables.items():
                     self.inventory.set_variable(hostname, field, value)
 
+        # Parse the location field if option is enabled. libre_location itself is set
+        # unmodified below by the general field loop - these are additional vars.
+        if self.parse_location_field and device.get('location'):
+            location_variables = self._parse_location(hostname, device.get('location'))
+            if location_variables is not None:
+                self._step(f"{hostname}: adding {len(location_variables)} vars from the location field")
+                for field, value in location_variables.items():
+                    self.inventory.set_variable(hostname, field, value)
+
         for field, value in device.items():
             if field in self.exclude_fields:
                 continue
@@ -669,6 +715,94 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             return None
 
         return parsed
+
+    def _parse_location(self, hostname, location_value):
+        """Parses the LibreNMS location field into site/room/rack-unit variables
+
+        Expects the fixed format documented under parse_location_field:
+        <site>;[<room>];[<rack>];[[<stack_nr>]u<u_nr>];...  Segments after site/room are
+        classified by shape rather than position - one matching an optional stack number
+        plus 'u' plus a unit number is a unit spec, anything else non-empty is a rack
+        name that applies to every unit spec until the next rack name. A rack with no
+        unit specs before the next rack (or the end of the value) is still recorded, on
+        its own - a device can be racked without a known unit.
+
+        Args:
+            hostname (str): The hostname of the device, used to name it in messages
+            location_value (str): the raw location field taken from the API
+
+        Returns:
+            parsed_variables(dict): site/room/positions vars to set, or None if the
+                value has no site (eg. it starts with ';') or isn't a string
+        """
+        self._step(f"{hostname}: parsing the location field")
+
+        # location is normally a string, but nothing enforces that API-side so we 
+        # should guard it
+        if not isinstance(location_value, str):
+            self._problem(f"{hostname}: location field is not a string, skipping location parsing")
+            return None
+
+        segments = location_value.split(";")
+
+        site = segments[0].strip()
+        if not site:
+            self._problem(f"{hostname}: location field has no site, skipping location parsing")
+            return None
+
+        # A location with no semicolons at all (just a site) is the minimal, still
+        # valid, form of the format
+        variables = {"libre_location_site": site}
+
+        room = segments[1].strip() if len(segments) > 1 else ""
+        if room:
+            variables["libre_location_room"] = room
+
+        positions = []
+        # The rack name currently in effect
+        current_rack = None
+        # Whether a unit spec has claimed the current rack yet or not
+        current_rack_used = False
+
+        def flush_bare_rack():
+            # Record a rack that never got a unit spec before it was superseded (or the
+            # value ended), so a rack with no unit is not silently dropped.
+            if current_rack is not None and not current_rack_used:
+                positions.append({"rack": current_rack})
+
+        # For every segment except the first two (unit specs)
+        for raw_segment in segments[2:]:
+            segment = raw_segment.strip()
+            if not segment:
+                continue
+
+            # Match the segment against the defined regex pattern for unit specs
+            match = self._LOCATION_UNIT_RE.match(segment)
+            if match is None:
+                # Not a unit spec - starts a new rack context.
+                flush_bare_rack()
+                current_rack = segment
+                current_rack_used = False
+                continue
+
+            # A unit spec - attach it to whatever rack is currently in effect, if any.
+            position = {"unit": int(match.group("unit"))}
+            if current_rack is not None:
+                position["rack"] = current_rack
+            if match.group("stack_nr") is not None:
+                position["stack_nr"] = int(match.group("stack_nr"))
+            positions.append(position)
+            current_rack_used = True
+
+        # The last rack in the value never gets superseded by another, so it needs its
+        # own flush after the loop ends.
+        flush_bare_rack()
+
+        if positions:
+            self._step(f"{hostname}: location gives {len(positions)} rack/unit position(s)")
+            variables["libre_location_positions"] = positions
+
+        return variables
 
     def _compile_trimming_patterns(self, configured):
         """Validates the hardware_trimming_patterns option and pre-compiles its patterns
@@ -863,6 +997,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         self.hostname_field = self.get_option("hostname_field")
         self.device_groups_as_ansible_groups = self.get_option("device_groups_as_ansible_groups")
         self.parse_notes_field = self.get_option("parse_notes_field")
+        self.parse_location_field = self.get_option("parse_location_field")
         self.hardware_trimming_patterns = self._compile_trimming_patterns(
             self.get_option("hardware_trimming_patterns")
         )

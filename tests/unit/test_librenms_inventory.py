@@ -264,6 +264,116 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
         self.assertTrue(host_vars["var1"])
 
 
+class TestLocationParsing(LibrenmsInventoryTestCase):
+    def test_location_field_ignored_by_default(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        host_vars = inventory.get_host("loc-site-only").get_vars()
+        self.assertNotIn("libre_location_site", host_vars)
+        self.assertEqual(host_vars["libre_location"], "DC1")
+
+    def test_site_only_location_is_the_minimal_valid_form(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-site-only").get_vars()
+        self.assertEqual(host_vars["libre_location_site"], "DC1")
+        self.assertNotIn("libre_location_room", host_vars)
+        self.assertNotIn("libre_location_positions", host_vars)
+
+    def test_site_and_room(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-site-room").get_vars()
+        self.assertEqual(host_vars["libre_location_site"], "DC1")
+        self.assertEqual(host_vars["libre_location_room"], "Room2")
+        self.assertNotIn("libre_location_positions", host_vars)
+
+    def test_bare_rack_is_recorded_without_a_unit(self):
+        # DC1;Room2;RackA;RackB;u5;RackC - RackA and RackC never get a unit spec before
+        # being superseded (or the value ending), RackB does.
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-bare-racks").get_vars()
+        self.assertEqual(
+            host_vars["libre_location_positions"],
+            [{"rack": "RackA"}, {"rack": "RackB", "unit": 5}, {"rack": "RackC"}],
+        )
+
+    def test_stack_members_across_racks_with_stack_numbers(self):
+        # DC1;;RackA;1u10;2u11;RackB;u5 - two stack members in RackA, a third in RackB
+        # with no stack number given.
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-stack").get_vars()
+        self.assertEqual(host_vars["libre_location_site"], "DC1")
+        self.assertNotIn("libre_location_room", host_vars)
+        self.assertEqual(
+            host_vars["libre_location_positions"],
+            [
+                {"rack": "RackA", "stack_nr": 1, "unit": 10},
+                {"rack": "RackA", "stack_nr": 2, "unit": 11},
+                {"rack": "RackB", "unit": 5},
+            ],
+        )
+
+    def test_unit_without_a_rack(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-unit-no-rack").get_vars()
+        self.assertEqual(host_vars["libre_location_positions"], [{"unit": 5}])
+
+    def test_blank_site_is_skipped_with_a_warning(self):
+        # ;Room2;RackA;u5 - no site, so the whole value is skipped rather than guessing.
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-blank-site").get_vars()
+        self.assertNotIn("libre_location_site", host_vars)
+        self.assertNotIn("libre_location_positions", host_vars)
+        # libre_location itself is untouched even when parsing is skipped.
+        self.assertEqual(host_vars["libre_location"], ";Room2;RackA;u5")
+
+    def test_non_string_location_is_skipped_without_crashing(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-non-string").get_vars()
+        self.assertNotIn("libre_location_site", host_vars)
+        self.assertEqual(host_vars["libre_location"], 12345)
+
+    def test_empty_location_sets_no_derived_vars(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-empty").get_vars()
+        self.assertNotIn("libre_location_site", host_vars)
+        self.assertEqual(host_vars["libre_location"], "")
+
+
 class TestFiltering(LibrenmsInventoryTestCase):
     def test_exclude_ignored_false_includes_ignored_device(self):
         _, inventory = self.build_plugin(exclude_ignored=False)

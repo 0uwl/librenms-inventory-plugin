@@ -71,9 +71,11 @@ Every field returned by the LibreNMS API for a device is set as a `libre_<field>
 host var (e.g. `libre_hardware`, `libre_os`, `libre_location`), except for the fields
 listed in `exclude_fields` (see [Sensitive fields](#sensitive-fields) below).
 
-Two host vars are derived rather than reported - `libre_hardware_family` and
-`libre_hardware_variant` - and only exist when
-[hardware trimming](#trimming-hardware-to-a-product-family) is configured. Every other
+Some host vars are derived rather than reported, and only exist when the option behind
+them is configured: `libre_hardware_family` and `libre_hardware_variant` from
+[hardware trimming](#trimming-hardware-to-a-product-family), and `libre_location_site`,
+`libre_location_room`, `libre_location_positions` from
+[location parsing](#parsing-the-location-field-into-rackunit-positions). Every other
 `libre_<field>` is exactly what the API returned; no option modifies one.
 
 Anything derived from those fields - e.g. `ansible_host` from `libre_hostname`, or
@@ -176,6 +178,61 @@ lowercase_hardware_family: true   # -> hw_c9300, hw_n9k_c93180yc
 
 `libre_hardware` is not affected. The option does nothing unless
 `hardware_trimming_patterns` is configured.
+
+## Parsing the location field into rack/unit positions
+
+If your LibreNMS instance encodes a device's precise physical position in its
+`location` field (LibreNMS' copy of SNMP `sysLocation`), `parse_location_field` can
+break that back out into host vars instead of leaving it as one opaque string. It only
+understands one fixed format - there is nothing to configure beyond turning it on:
+
+```
+<site>;[<room>];[<rack>];[[<stack_nr>]u<u_nr>];...
+```
+
+```yaml
+# librenms.yml
+parse_location_field: true
+```
+
+`site` is required and is everything before the first `;`. `room` is an optional second
+field. Everything after that is a sequence of rack names and rack-unit positions, told
+apart by shape rather than position: a segment that is an optional number followed by
+`u` followed by a number (`u10`, `2u5`) is a unit position; anything else non-empty
+names the rack that the unit positions after it belong to, until the next rack name.
+This is what lets a stack of physically separate devices that LibreNMS reports as a
+single device (eg. a switch stack) record where each member sits - one unit position
+per member, across racks if the stack spans more than one.
+
+| `location` | Result |
+| --- | --- |
+| `DC1` | site `DC1` - the minimal valid form, not a mismatch |
+| `DC1;Room2` | site `DC1`, room `Room2` |
+| `DC1;Room2;RackA;u10` | site `DC1`, room `Room2`, one position: rack `RackA`, unit `10` |
+| `DC1;Room2;RackA;1u10;2u11` | two positions in `RackA`: unit `10` (stack member `1`), unit `11` (stack member `2`) |
+| `DC1;Room2;RackA;RackB;u5` | two positions: rack `RackA` alone (no unit given yet), then rack `RackB` with unit `5` |
+
+Sets `libre_location_site`, `libre_location_room` (only when given), and
+`libre_location_positions` - a list of dicts, one per rack and/or unit position found,
+each holding whichever of `rack`, `unit`, `stack_nr` were given for it:
+
+```yaml
+# constructed.yml, over a device with location "DC1;Room2;RackA;1u10;2u11"
+compose:
+  primary_rack: libre_location_positions[0].rack   # "RackA"
+  primary_unit: libre_location_positions[0].unit   # 10
+```
+
+A rack name with no unit position before the next rack (or the end of the value) still
+gets its own entry - `{"rack": "RackA"}` with no `unit` key - rather than being dropped,
+so "racked but the exact unit isn't tracked" is representable. A unit position with no
+rack before it (eg. a bare `DC1;Room2;u5`) is the reverse: `{"unit": 5}` with no `rack`
+key.
+
+A `location` with no site at all (starting with `;`) doesn't match the format and is
+skipped, with a `-v` warning - see [Troubleshooting](#troubleshooting) - since not every
+device in a fleet necessarily uses this scheme. `libre_location` itself is always left
+exactly as LibreNMS reported it, whether or not it was parsed.
 
 ## Sensitive fields
 
@@ -327,6 +384,7 @@ it, so a run that "worked" but produced the wrong thing explains itself:
 | `device <name> has no <field>, naming it <uuid>` | `hostname_field` names a field this device does not have |
 | `api_token did not resolve to a value` | The vault/extra var referenced by `api_token` is not defined |
 | `<host>: notes field is YAML but not a mapping of vars` | The Notes field parses, but not into `key: value` pairs |
+| `<host>: location field has no site` | `location` doesn't start with a site before the first `;` - see [Parsing the location field](#parsing-the-location-field-into-rackunit-positions) |
 
 At `-vvvv` every step is reported as it happens - options being applied, each API request
 and whether it came from the cache, each device that was skipped and why, the hardware

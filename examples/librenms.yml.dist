@@ -20,6 +20,11 @@ exclude_ignored: true
 # README's Grouping section.
 # parse_notes_field: true
 
+# Parse the location field as <site>;[<room>];[<rack>];[[<stack_nr>]u<u_nr>];... into
+# libre_location_site / _room / _positions - see the README's "Parsing the location
+# field into rack/unit positions" section. libre_location itself is left untouched.
+# parse_location_field: true
+
 # Derive libre_hardware_family (and libre_hardware_variant) so devices can be grouped by
 # family instead of by exact product ID - see the README's "Trimming hardware to a
 # product family" section. libre_hardware itself is left untouched. Keyed on the LibreNMS
