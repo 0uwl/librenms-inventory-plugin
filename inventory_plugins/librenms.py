@@ -136,6 +136,45 @@ DOCUMENTATION = r"""
                   avoid this option, or admins should be made aware of the risk.
             type: bool
             default: false
+        hardware_trimming_patterns:
+            description:
+                - Derive a more general product family from the C(hardware) field, so hosts
+                  can be grouped by family instead of by exact product ID.
+                - Sets C(libre_hardware_family), and C(libre_hardware_variant) for whatever
+                  the pattern leaves behind, eg. C(C9300-48P) gives a family of C(C9300) and
+                  a variant of C(48P). C(libre_hardware) is never modified, since the product
+                  ID cannot be reconstructed from the two - a pattern may consume text that
+                  neither of them keeps.
+                - A mapping of LibreNMS C(os) value (eg. C(ios), C(nxos)) to a list of regular
+                  expressions. For each device the patterns listed under its own C(os) are
+                  tried in order and the first one to match wins. Devices whose C(os) has no
+                  entry, and values that match none of its patterns, get a family equal to
+                  the value LibreNMS reported and no variant.
+                - Patterns are anchored at the start of the value. If a pattern contains a
+                  capture group the first group becomes the family, otherwise the whole
+                  match does. The capture group is what lets a pattern drop a prefix - a
+                  pattern of '^WS-(C\d+[A-Z]*)' gives C(WS-C3850-24T) a family of C(C3850),
+                  grouping older Catalyst switches under the same names as the 9K
+                  generation. Text consumed without being captured is in neither variable.
+                - The separator a pattern broke on is stripped from the variant. Devices
+                  with nothing left over get no variant at all, rather than an empty one.
+                - Both derived variables are unset for devices LibreNMS reports no hardware
+                  for, and when this option is not configured.
+                - An invalid regular expression fails the inventory run immediately, naming
+                  the offending pattern.
+                - The family keeps the casing LibreNMS reported. See
+                  C(lowercase_hardware_family) to normalise it.
+            type: dict
+            default: {}
+        lowercase_hardware_family:
+            description:
+                - Lowercase C(libre_hardware_family) and C(libre_hardware_variant), so that
+                  they are safe to use directly in group names without a Jinja filter on the
+                  consuming side.
+                - C(libre_hardware) is not affected, it always holds what LibreNMS reported.
+                - Has no effect unless C(hardware_trimming_patterns) is configured.
+            type: bool
+            default: false
 """
 
 EXAMPLES = r"""
@@ -161,7 +200,20 @@ group_name_regex_filter:
 # `constructed` plugin over this one's output - see the README's Grouping section.
 
 # Enable this to read the Notes value as YAML and derrive additional host vars from it
-parse_notes_field: true
+parse_notes_field: false
+
+# Trim the hardware value down to a product family, per LibreNMS os. Order matters
+# within a list - the first pattern to match wins.
+hardware_trimming_patterns:
+  ios: &cisco_catalyst
+    - '^WS-(C\d+[A-Z]*)'
+    - '^C\d+[A-Z]*'
+  iosxe: *cisco_catalyst
+  nxos:
+    - '^[NC]?\dK-C\d+[A-Z]*'
+
+# Lowercase the derived family and variant so they can be used directly in group names
+lowercase_hardware_family: true
 """
 
 import json
@@ -180,15 +232,6 @@ from ansible.plugins.inventory import BaseInventoryPlugin, Cacheable
 
 class InventoryModule(BaseInventoryPlugin, Cacheable):
     NAME = "librenms"
-
-    def _require_inventory(self):
-        # self.inventory is only populated once BaseInventoryPlugin.parse() has run; every
-        # caller of this helper runs from within/after our own parse(), so this should
-        # never actually trigger, it exists to fail loudly instead of with a bare
-        # AttributeError, and to give type checkers a non-Optional value to work with.
-        if self.inventory is None:
-            raise AnsibleError("Inventory data is not initialized; parse() has not run yet.")
-        return self.inventory
 
     # --- HTTP / caching -------------------------------------------------
 
@@ -403,16 +446,55 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             hostname (str): The hostname of the device
             device (dict): The full device dictionary fetched from the API
         """
+
+        # Parse notes if option is enabled
         if self.parse_notes_field and device.get('notes'):
             notes_variables = self._parse_notes(device.get('notes'))
             if notes_variables is not None:
                 for field, value in notes_variables.items():
-                    self._require_inventory().set_variable(hostname, field, value)
+                    self.inventory.set_variable(hostname, field, value)
 
         for field, value in device.items():
             if field in self.exclude_fields:
                 continue
-            self._require_inventory().set_variable(hostname, "libre_" + field, value)
+
+            if field == 'hardware':
+                self._set_hardware_variables(hostname, device, value)
+                continue
+
+            self.inventory.set_variable(hostname, "libre_" + field, value)
+
+    def _set_hardware_variables(self, hostname, device, hardware_value):
+        """Sets libre_hardware, plus the derived family and variant vars when trimming is on
+
+        Trimming only ever adds variables. libre_hardware stays exactly what LibreNMS
+        reported, because the product ID cannot be reconstructed from the family and the
+        variant - a pattern may consume text that neither of them keeps.
+
+        Args:
+            hostname (str): The hostname of the device
+            device (dict): The full device dictionary fetched from the API
+            hardware_value: The device's hardware value, as reported by LibreNMS
+        """
+        self.inventory.set_variable(hostname, "libre_hardware", hardware_value)
+
+        # LibreNMS reports no hardware for devices it could not identify
+        if not self.hardware_trimming_patterns or not isinstance(hardware_value, str):
+            return
+
+        family, variant = self._trim_hardware(hardware_value, device.get('os'))
+
+        if self.lowercase_hardware_family:
+            family = family.lower()
+            if variant is not None:
+                variant = variant.lower()
+
+        self.inventory.set_variable(hostname, "libre_hardware_family", family)
+
+        # Left unset rather than set to None, so that a device whose product ID is only a
+        # family does not end up in a group of its own when keyed on the variant.
+        if variant is not None:
+            self.inventory.set_variable(hostname, "libre_hardware_variant", variant)
 
     def _parse_notes(self, notes_value: str):
         """Parses the LibreNMS notes field as YAML
@@ -438,7 +520,71 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             return None
 
         return parsed
-            
+
+    def _compile_trimming_patterns(self, configured):
+        """Validates the hardware_trimming_patterns option and pre-compiles its patterns
+
+        Ansible only checks that the option is a dict, so the shape of the values is
+        checked here. Compiling up front means a bad pattern fails the run immediately,
+        naming itself, rather than part way through building the host list.
+
+        Args:
+            configured (dict): The raw option value, keyed on LibreNMS os
+
+        Returns:
+            compiled (dict): Lowercased os mapped to its list of compiled patterns
+        """
+        compiled = {}
+
+        for os_name, patterns in (configured or {}).items():
+            if not isinstance(patterns, list):
+                raise AnsibleError(
+                    f"hardware_trimming_patterns['{os_name}'] must be a list of regular "
+                    f"expressions, got {type(patterns).__name__}."
+                )
+
+            for pattern in patterns:
+                try:
+                    compiled.setdefault(str(os_name).lower(), []).append(re.compile(pattern))
+                except (re.error, TypeError) as e:
+                    raise AnsibleError(
+                        f"hardware_trimming_patterns['{os_name}'] contains an invalid "
+                        f"regular expression {pattern!r}: {e}"
+                    ) from e
+
+        return compiled
+
+    def _trim_hardware(self, hardware_value, os_name):
+        """Splits a hardware value into its product family and the variant that follows it
+
+        Args:
+            hardware_value (str): The hardware value as reported by LibreNMS
+            os_name (str): The device's LibreNMS os, which selects the pattern list
+
+        Returns:
+            (family, variant): The trimmed value and whatever the pattern left behind, the
+                latter being None when nothing is left over. When the device's os has no
+                patterns configured, or none of them match, the value is returned unchanged
+                with no variant.
+        """
+        patterns = self.hardware_trimming_patterns.get(str(os_name).lower())
+        if not patterns:
+            return hardware_value, None
+
+        for pattern in patterns:
+            if (match := pattern.match(hardware_value)):
+                # A capture group lets a pattern drop a prefix, eg. the WS- on older
+                # Catalyst switches. Without one, the whole match names the family.
+                family = match.group(1) if pattern.groups else match.group(0)
+                # Whatever the pattern did not consume is the variant. The separator it
+                # broke on is an artefact of where the boundary fell, not part of the
+                # value, so it is stripped.
+                variant = hardware_value[match.end():].lstrip("-/_ ") or None
+                return family, variant
+
+        self.display.vvv(f"No hardware pattern matched: {hardware_value}")
+        return hardware_value, None
+
     # --- Grouping -----------------------------------------------------
 
     def _add_host_to_device_groups(self, device_id, hostname, membership):
@@ -451,9 +597,9 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         """
         for group_name in membership.get(device_id, []):
             # Let Ansible transform the LibreNMS group name
-            transformed_group_name = self._require_inventory().add_group(group_name)
+            transformed_group_name = self.inventory.add_group(group_name)
             # Add the host to the group
-            self._require_inventory().add_host(group=transformed_group_name, host=hostname)
+            self.inventory.add_host(group=transformed_group_name, host=hostname)
 
     # --- Main flow ------------------------------------------------------
 
@@ -478,7 +624,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             hostname = self._derive_hostname(device)
 
             # Add the host to the dynamic inventory
-            self._require_inventory().add_host(hostname)
+            self.inventory.add_host(hostname)
 
             # Set the host's variables
             self._set_host_variables(hostname, device)
@@ -526,6 +672,10 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         self.hostname_field = self.get_option("hostname_field")
         self.device_groups_as_ansible_groups = self.get_option("device_groups_as_ansible_groups")
         self.parse_notes_field = self.get_option("parse_notes_field")
+        self.hardware_trimming_patterns = self._compile_trimming_patterns(
+            self.get_option("hardware_trimming_patterns")
+        )
+        self.lowercase_hardware_family = self.get_option("lowercase_hardware_family")
 
         self.cache_force_update = self.get_option("cache_force_update")
         self.use_cache = cache
