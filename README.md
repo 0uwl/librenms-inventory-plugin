@@ -101,7 +101,7 @@ hardware_trimming_patterns:
     - '^[NC]?\dK-C\d+[A-Z]*'
 ```
 
-This **adds** two host vars and leaves `libre_hardware` alone:
+This **adds** two host vars and leaves `libre_hardware` unchanged:
 
 | `libre_hardware` | `os` | `libre_hardware_family` | `libre_hardware_variant` |
 | --- | --- | --- | --- |
@@ -138,18 +138,6 @@ Cisco-specific - `junos: ['^EX\d+']` gives `EX4300-48T` a family of `EX4300`.
 An invalid regular expression fails the inventory run immediately and names the pattern,
 rather than silently skipping devices.
 
-### Why `libre_hardware` is left alone
-
-The family and the variant together are lossy, so the reported product ID has to survive
-somewhere. `^WS-(C\d+[A-Z]*)` matches the `WS-` and discards it: `WS-C3850-24T` becomes a
-family of `C3850` and a variant of `24T`, and nothing recombines those into the original.
-Anything a pattern consumes without capturing is gone from both derived vars, which is
-exactly what you want for grouping and exactly what you do not want when looking up a
-spare or an end-of-life date.
-
-So `libre_hardware` keeps holding what the API returned, under every combination of these
-options, and the derived vars are additive.
-
 ### The family and the variant
 
 `libre_hardware_family` is the trimmed value. Devices whose `os` has no patterns, and
@@ -173,6 +161,7 @@ compose:
 
 Both are unset for devices LibreNMS reports no hardware for, and when
 `hardware_trimming_patterns` is not configured at all.
+`libre_hardware` remains unchanged.
 
 ### Lowercasing
 
