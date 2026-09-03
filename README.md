@@ -313,6 +313,20 @@ alongside `librenms` (see `examples/ansible.cfg.example`). See
 ansible-inventory -v --list -i librenms.yml -i constructed.yml
 ```
 
+### Nested site/room/rack groups from a parsed location
+
+`examples/constructed.yml.dist` also has a worked `keyed_groups` example that turns
+[a parsed location](#parsing-the-location-field-into-rackunit-positions) into nested
+groups: `site_NYC`, a `site_NYC_room_Room2` child of it, and a
+`site_NYC_room_Room2_rack_RackA` child of that - one rack group per rack a device's
+`libre_location_positions` mentions. Each child's group name is prefixed with its
+parent's *full* name, not just Ansible's `parent_group` nesting on its own (which keeps
+the child's own short name) - `compose` precomputes each level's full name once, since
+building it inline in every `keyed_groups` entry that needs it would repeat the same
+concatenation three times. A host missing a level (no room, or a rack never paired with
+a unit) simply gets no group at that level or below, rather than an empty one - see the
+comments in the example file for how each entry produces that fallback.
+
 ### Grouping by data LibreNMS doesn't have (eg. environment)
 
 For information that has no source in LibreNMS at all - which environment a device is

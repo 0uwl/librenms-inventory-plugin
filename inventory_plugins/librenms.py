@@ -737,7 +737,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         """
         self._step(f"{hostname}: parsing the location field")
 
-        # location is normally a string, but nothing enforces that API-side so we 
+        # location is normally a string, but nothing enforces that API-side so we
         # should guard it
         if not isinstance(location_value, str):
             self._problem(f"{hostname}: location field is not a string, skipping location parsing")
