@@ -17,6 +17,15 @@ compose:
   ansible_host: libre_hostname
   ansible_network_os: "{'iosxe': 'ios'}.get(libre_os, libre_os)"
 
+  # Nested site/room groups below need each parent's *full* group name as a literal
+  # prefix, not just the raw libre_location_* value - precompute it once here rather
+  # than repeating the same concatenation in every keyed_groups entry that needs it.
+  # Each is independent (compose entries can't see vars other entries in this same
+  # block just set), and simply doesn't get set for a host missing the var it needs -
+  # eg. no _room_group at all for a host with no libre_location_room.
+  _site_group: "'site_' ~ libre_location_site"
+  _room_group: "'site_' ~ libre_location_site ~ '_room_' ~ libre_location_room"
+
 groups:
   # The variable 'purpose' is referred as 'description' in the LibreNMS UI
   network_edge: "'router' in libre_purpose | default('')"
@@ -31,3 +40,35 @@ keyed_groups:
   # (see the README's Grouping section).
   - prefix: env
     key: deploy_environment
+
+  # Nested site -> room -> rack groups from a parsed location (parse_location_field in
+  # librenms.yml - see the README's "Parsing the location field into rack/unit
+  # positions" section). Each level's group name is prefixed with its *parent's full
+  # name*, not just nested under a short one - site "NYC" gives site_NYC, and its room
+  # "Room2" gives site_NYC_room_Room2 as a child of site_NYC, not a bare "Room2". Hosts
+  # missing a level (no room, no rack) simply don't get a group at that level or below -
+  # see _site_group/_room_group above for how each level's name is built.
+
+  # site_NYC
+  - key: libre_location_site
+    prefix: site
+
+  # site_NYC_room_Room2, nested under site_NYC
+  - key: _room_group
+    prefix: ""
+    separator: ""
+    parent_group: "{{ _site_group }}"
+
+  # site_NYC_room_Room2_rack_RackA (one group per distinct rack in
+  # libre_location_positions), nested under the room group above - or directly under
+  # the site group, as eg. site_NYC_rack_RackA, for a host with a rack but no room.
+  - key: >-
+      libre_location_positions
+      | map(attribute='rack', default=None)
+      | select('string')
+      | unique
+      | map('regex_replace', '^(.*)$', (_room_group | default(_site_group)) ~ '_rack_\\1')
+      | list
+    prefix: ""
+    separator: ""
+    parent_group: "{{ _room_group | default(_site_group) }}"

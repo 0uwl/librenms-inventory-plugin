@@ -11,6 +11,7 @@ from ansible.errors import AnsibleError
 from ansible.inventory.data import InventoryData
 from ansible.parsing.dataloader import DataLoader
 from ansible.plugins.loader import inventory_loader
+from ansible.utils.display import Display
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "fixtures")
@@ -33,11 +34,16 @@ def load_fixture(name):
         return json.load(f)
 
 
+# The LibreNMS group "Network Core" has a space in its name, so it reaches the API
+# URL-quoted and lands in the inventory as the group "Network_Core".
+NETWORK_CORE_ROUTE = "/devicegroups/Network%20Core"
+
 DEFAULT_ROUTES = {
     "/devices": "devices.json",
     "/devicegroups/Core": "devicegroups_core.json",
     "/devicegroups/Edge": "devicegroups_edge.json",
     "/devicegroups/Decommissioned": "devicegroups_decommissioned.json",
+    NETWORK_CORE_ROUTE: "devicegroups_network_core.json",
     # order matters: must be checked after the more specific /devicegroups/<name> routes
     "/devicegroups": "devicegroups.json",
 }
@@ -191,7 +197,7 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
         self.assertEqual(host_vars["libre_community"], "public")
         self.assertEqual(host_vars["libre_authpass"], "authsecret")
         self.assertEqual(host_vars["libre_cryptopass"], "cryptosecret")
-        
+
     def test_notes_field_ignored_by_default(self):
         routes = dict(DEFAULT_ROUTES)
         routes["/devices"] = "devices_notes.json"
@@ -261,6 +267,116 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
 
         host_vars = inventory.get_host("custom-sw5").get_vars()
         self.assertTrue(host_vars["var1"])
+
+
+class TestLocationParsing(LibrenmsInventoryTestCase):
+    def test_location_field_ignored_by_default(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        host_vars = inventory.get_host("loc-site-only").get_vars()
+        self.assertNotIn("libre_location_site", host_vars)
+        self.assertEqual(host_vars["libre_location"], "DC1")
+
+    def test_site_only_location_is_the_minimal_valid_form(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-site-only").get_vars()
+        self.assertEqual(host_vars["libre_location_site"], "DC1")
+        self.assertNotIn("libre_location_room", host_vars)
+        self.assertNotIn("libre_location_positions", host_vars)
+
+    def test_site_and_room(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-site-room").get_vars()
+        self.assertEqual(host_vars["libre_location_site"], "DC1")
+        self.assertEqual(host_vars["libre_location_room"], "Room2")
+        self.assertNotIn("libre_location_positions", host_vars)
+
+    def test_bare_rack_is_recorded_without_a_unit(self):
+        # DC1;Room2;RackA;RackB;u5;RackC - RackA and RackC never get a unit spec before
+        # being superseded (or the value ending), RackB does.
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-bare-racks").get_vars()
+        self.assertEqual(
+            host_vars["libre_location_positions"],
+            [{"rack": "RackA"}, {"rack": "RackB", "unit": 5}, {"rack": "RackC"}],
+        )
+
+    def test_stack_members_across_racks_with_stack_numbers(self):
+        # DC1;;RackA;1u10;2u11;RackB;u5 - two stack members in RackA, a third in RackB
+        # with no stack number given.
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-stack").get_vars()
+        self.assertEqual(host_vars["libre_location_site"], "DC1")
+        self.assertNotIn("libre_location_room", host_vars)
+        self.assertEqual(
+            host_vars["libre_location_positions"],
+            [
+                {"rack": "RackA", "stack_nr": 1, "unit": 10},
+                {"rack": "RackA", "stack_nr": 2, "unit": 11},
+                {"rack": "RackB", "unit": 5},
+            ],
+        )
+
+    def test_unit_without_a_rack(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-unit-no-rack").get_vars()
+        self.assertEqual(host_vars["libre_location_positions"], [{"unit": 5}])
+
+    def test_blank_site_is_skipped_with_a_warning(self):
+        # ;Room2;RackA;u5 - no site, so the whole value is skipped rather than guessing.
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-blank-site").get_vars()
+        self.assertNotIn("libre_location_site", host_vars)
+        self.assertNotIn("libre_location_positions", host_vars)
+        # libre_location itself is untouched even when parsing is skipped.
+        self.assertEqual(host_vars["libre_location"], ";Room2;RackA;u5")
+
+    def test_non_string_location_is_skipped_without_crashing(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-non-string").get_vars()
+        self.assertNotIn("libre_location_site", host_vars)
+        self.assertEqual(host_vars["libre_location"], 12345)
+
+    def test_empty_location_sets_no_derived_vars(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_locations.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_location_field=True)
+
+        host_vars = inventory.get_host("loc-empty").get_vars()
+        self.assertNotIn("libre_location_site", host_vars)
+        self.assertEqual(host_vars["libre_location"], "")
 
 
 class TestFiltering(LibrenmsInventoryTestCase):
@@ -476,6 +592,133 @@ class TestGrouping(LibrenmsInventoryTestCase):
         # Only the Core membership endpoint should have been queried, not Edge/Decommissioned
         self.assertTrue(any(url.endswith("/devicegroups/Core") for url in call_log))
         self.assertFalse(any(url.endswith("/devicegroups/Edge") for url in call_log))
+
+    def test_group_name_whitespace_becomes_underscores(self):
+        _, inventory = self.build_plugin(group_name_regex_filter=["^Network Core$"])
+
+        self.assertIn("Network_Core", inventory.groups)
+        self.assertEqual(
+            [h.name for h in inventory.groups["Network_Core"].get_hosts()], ["core-sw1"]
+        )
+
+    def test_group_name_is_url_quoted_when_fetching_members(self):
+        call_log = []
+        self.build_plugin(call_log=call_log, group_name_regex_filter=["^Network Core$"])
+
+        # Raw whitespace in the path would make the HTTP request itself invalid
+        self.assertTrue(any(url.endswith(NETWORK_CORE_ROUTE) for url in call_log), call_log)
+
+    def test_every_character_ansible_rejects_is_converted(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups"] = "devicegroups_unsafe_names.json"
+        for quoted in ("%20Site%201%20", "Site-2", "1st%20Floor", "Core%20%26%20Dist", "10.0.0.0%2F8"):
+            routes["/devicegroups/" + quoted] = "devicegroups_core.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        self.assertEqual(
+            set(inventory.groups) - {"all", "ungrouped"},
+            {
+                "Site_1",        # " Site 1 " - padding dropped, not turned into underscores
+                "Site_2",        # "-" is rejected just like whitespace is
+                "_1st_Floor",    # a leading digit is prefixed, never overwritten
+                "Core___Dist",   # each rejected character becomes one underscore
+                "_10_0_0_0_8",
+            },
+        )
+
+    def test_whitespace_only_group_name_is_skipped(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups"] = "devicegroups_blank_name.json"
+        routes["/devicegroups/%20%20"] = "devicegroups_core.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        # Nothing is left to name a group with, and an empty name would fail the run
+        self.assertEqual(set(inventory.groups.keys()), {"all", "ungrouped"})
+        self.assertIn("core-sw1", inventory.hosts)
+
+    def test_names_that_convert_to_the_same_group_are_merged(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups"] = "devicegroups_colliding.json"
+        routes[NETWORK_CORE_ROUTE] = "devicegroups_core.json"
+        routes["/devicegroups/Network-Core"] = "devicegroups_edge.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        # Ansible cannot tell the two apart, so their members end up together - the run
+        # warns about it (see TestDisplayMessages) rather than dropping either group
+        self.assertEqual(set(inventory.groups) - {"all", "ungrouped"}, {"Network_Core"})
+        self.assertEqual(
+            {h.name for h in inventory.groups["Network_Core"].get_hosts()},
+            {"core-sw1", "core-sw2"},
+        )
+
+    def test_group_named_after_an_implicit_group_still_adds_its_members(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups"] = "devicegroups_implicit_name.json"
+        routes["/devicegroups/ungrouped"] = "devicegroups_core.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        # "ungrouped" is a valid Ansible group name, so it is left alone and merges into
+        # the group Ansible makes itself - which the run warns about
+        self.assertEqual(set(inventory.groups.keys()), {"all", "ungrouped"})
+        self.assertIn("core-sw1", [h.name for h in inventory.groups["ungrouped"].get_hosts()])
+
+    def test_mapped_group_gets_the_name_it_was_mapped_to(self):
+        _, inventory = self.build_plugin(group_name_mapping={"Core": "os_iosxe"})
+
+        self.assertIn("os_iosxe", inventory.groups)
+        self.assertNotIn("Core", inventory.groups)
+        self.assertEqual(
+            {h.name for h in inventory.groups["os_iosxe"].get_hosts()}, {"core-sw1", "core-sw2"}
+        )
+
+    def test_mapping_applies_to_names_that_would_be_converted(self):
+        _, inventory = self.build_plugin(group_name_mapping={"Network Core": "core"})
+
+        # The mapped name is used as written, the conversion never sees it
+        self.assertIn("core", inventory.groups)
+        self.assertNotIn("Network_Core", inventory.groups)
+
+    def test_mapping_keys_match_the_librenms_name_exactly(self):
+        _, inventory = self.build_plugin(
+            group_name_mapping={"core": "wrong_case", "Network_Core": "converted_name"}
+        )
+
+        # Neither key is a device group name: LibreNMS reports "Core" and "Network Core"
+        self.assertEqual(set(inventory.groups) - {"all", "ungrouped"}, {"Core", "Network_Core"})
+
+    def test_unmapped_groups_keep_their_own_name(self):
+        _, inventory = self.build_plugin(group_name_mapping={"Core": "os_iosxe"})
+
+        self.assertIn("Network_Core", inventory.groups)
+
+    def test_mapping_is_applied_after_the_regex_filter(self):
+        _, inventory = self.build_plugin(
+            group_name_regex_filter=["^Core$"], group_name_mapping={"Core": "os_iosxe"}
+        )
+
+        # The filter matches the LibreNMS name, the mapping renames what survives it
+        self.assertEqual(set(inventory.groups) - {"all", "ungrouped"}, {"os_iosxe"})
+
+    def test_mapping_two_groups_to_one_name_merges_them(self):
+        _, inventory = self.build_plugin(
+            group_name_mapping={"Core": "cisco", "Network Core": "cisco"}
+        )
+
+        self.assertEqual(set(inventory.groups) - {"all", "ungrouped"}, {"cisco"})
+        self.assertEqual(
+            {h.name for h in inventory.groups["cisco"].get_hosts()}, {"core-sw1", "core-sw2"}
+        )
+
+    def test_group_name_regex_filter_matches_the_librenms_name(self):
+        # The filter is documented to run against the name as LibreNMS reports it, so a
+        # pattern written against the converted name must not match.
+        _, inventory = self.build_plugin(group_name_regex_filter=["^Network_Core$"])
+
+        self.assertNotIn("Network_Core", inventory.groups)
 
     def test_devicegroups_no_members_quirk_does_not_raise(self):
         # The "Decommissioned" fixture returns LibreNMS' odd error-shaped empty response.
@@ -704,6 +947,221 @@ class TestRequestConstruction(LibrenmsInventoryTestCase):
         self.assertEqual(headers["X-Auth-Token"], "test-token")
         self.assertEqual(headers["X-Extra"], "value")
         self.assertEqual(devices_requests[0]["timeout"], 45)
+
+
+class TestDisplayMessages(LibrenmsInventoryTestCase):
+    """The plugin narrates each step at -vvvv and reports degraded runs at -v, so a user
+    can follow what it did without reading the source."""
+
+    def capture_display(self, routes=None, **config_overrides):
+        """Run the plugin and collect what it sent to each Display level
+
+        Returns:
+            (steps, problems, warnings): The -vvvv, -v and warning messages, in order
+        """
+        # Display is a singleton shared by every plugin instance, so patching the class
+        # captures whatever the plugin emits regardless of verbosity.
+        steps, problems, warnings = [], [], []
+        with mock.patch.object(Display, "vvvv", steps.append), \
+                mock.patch.object(Display, "v", problems.append), \
+                mock.patch.object(Display, "warning", warnings.append):
+            self.build_plugin(routes=routes, **config_overrides)
+
+        return steps, problems, warnings
+
+    def test_every_stage_of_a_run_is_reported_at_vvvv(self):
+        steps, _, _ = self.capture_display()
+        joined = "\n".join(steps)
+
+        for expected in (
+            "reading inventory source",
+            "applying options",
+            "api endpoint is",
+            "resolving the api token",
+            "populating the inventory",
+            "fetching devices",
+            "fetching device groups",
+            "adding host core-sw1",
+            "setting host vars for core-sw1",
+            "adding core-sw1 to group Core",
+            "done",
+        ):
+            self.assertIn(expected, joined)
+
+    def test_step_messages_are_prefixed_so_they_can_be_grepped(self):
+        steps, _, _ = self.capture_display()
+
+        self.assertTrue(steps)
+        self.assertTrue(all(m.startswith("[librenms] ") for m in steps), steps)
+
+    def test_excluded_devices_say_why_they_were_skipped(self):
+        steps, _, _ = self.capture_display()
+        joined = "\n".join(steps)
+
+        self.assertIn("skipping \u00e9dge-fw1, it is disabled", joined)
+        self.assertIn("skipping old-switch, it is ignored", joined)
+
+    def test_filtering_every_device_out_is_reported_at_v(self):
+        _, problems, _ = self.capture_display(host_name_regex_filter=["^nothing-matches$"])
+
+        self.assertTrue(any("every device was filtered out" in m for m in problems), problems)
+
+    def test_group_filter_matching_nothing_is_reported_at_v(self):
+        _, problems, _ = self.capture_display(group_name_regex_filter=["^nothing-matches$"])
+
+        self.assertTrue(
+            any("matched none of the device groups" in m for m in problems), problems
+        )
+
+    def test_empty_device_list_is_reported_at_v(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = HttpErrorRoute(
+            404, payload={"status": "error", "message": "No devices found"}
+        )
+
+        _, problems, _ = self.capture_display(routes=routes)
+
+        self.assertTrue(any("returned no devices" in m for m in problems), problems)
+
+    def test_generated_hostname_is_reported_at_v(self):
+        _, problems, _ = self.capture_display(hostname_field="does_not_exist")
+
+        self.assertTrue(
+            any("has no does_not_exist, naming it" in m for m in problems), problems
+        )
+
+    def test_unconvertible_group_name_warns(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups"] = "devicegroups_blank_name.json"
+
+        _, _, warnings = self.capture_display(routes=routes)
+
+        self.assertTrue(
+            any("nothing is left of its name" in m for m in warnings), warnings
+        )
+
+    def test_group_names_converting_to_the_same_name_warn(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups"] = "devicegroups_colliding.json"
+        routes[NETWORK_CORE_ROUTE] = "devicegroups_core.json"
+        routes["/devicegroups/Network-Core"] = "devicegroups_edge.json"
+
+        _, _, warnings = self.capture_display(routes=routes)
+
+        self.assertTrue(
+            any("both end up as the group Network_Core" in m for m in warnings), warnings
+        )
+
+    def test_group_named_after_an_implicit_group_warns(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups"] = "devicegroups_implicit_name.json"
+        routes["/devicegroups/ungrouped"] = "devicegroups_core.json"
+
+        _, _, warnings = self.capture_display(routes=routes)
+
+        self.assertTrue(
+            any("same name as the group Ansible creates" in m for m in warnings), warnings
+        )
+
+    def test_mapping_key_matching_no_device_group_is_reported_at_v(self):
+        _, problems, _ = self.capture_display(group_name_mapping={"Cisco devices": "os_iosxe"})
+
+        self.assertTrue(
+            any("matched no device group for 'Cisco devices'" in m for m in problems), problems
+        )
+
+    def test_merging_two_groups_by_mapping_does_not_warn(self):
+        _, _, warnings = self.capture_display(
+            group_name_mapping={"Core": "cisco", "Network Core": "cisco"}
+        )
+
+        # Mapping both onto one name is what the user asked for, unlike two names that
+        # happen to convert to the same thing
+        self.assertFalse(any("end up as the group" in m for m in warnings), warnings)
+
+    def test_mapping_onto_a_converted_name_still_warns(self):
+        _, _, warnings = self.capture_display(group_name_mapping={"Core": "Network_Core"})
+
+        self.assertTrue(
+            any("both end up as the group Network_Core" in m for m in warnings), warnings
+        )
+
+    def test_mapped_group_name_is_reported_at_vvvv(self):
+        steps, _, _ = self.capture_display(group_name_mapping={"Core": "os_iosxe"})
+
+        self.assertTrue(any("Core is named os_iosxe" in m for m in steps), steps)
+
+    def test_converted_group_name_is_reported_at_vvvv(self):
+        steps, _, _ = self.capture_display()
+
+        self.assertTrue(
+            any("Network Core is named Network_Core" in m for m in steps), steps
+        )
+
+    def test_unresolved_api_token_is_reported_at_v(self):
+        _, problems, _ = self.capture_display(api_token="{{ never_defined }}")
+
+        self.assertTrue(
+            any("api_token did not resolve" in m for m in problems), problems
+        )
+
+
+class TestErrorMessages(LibrenmsInventoryTestCase):
+    """Failures that stop the run name the option the user should look at."""
+
+    def test_unreachable_endpoint_names_the_options_to_check(self):
+        plugin = get_plugin_instance()
+        modname = type(plugin).__module__
+
+        def unreachable(url, **kwargs):
+            raise urllib.error.URLError("Name or service not known")
+
+        config_path = write_config()
+        self._configs.append(config_path)
+
+        with mock.patch(modname + ".open_url", unreachable), self.assertRaises(AnsibleError) as raised:
+            plugin.parse(InventoryData(), DataLoader(), config_path, cache=False)
+
+        message = str(raised.exception)
+        self.assertIn("Could not reach the LibreNMS API", message)
+        self.assertIn("api_endpoint", message)
+
+    def test_invalid_mapping_target_names_the_entry(self):
+        with self.assertRaises(AnsibleError) as raised:
+            self.build_plugin(group_name_mapping={"Cisco devices": "os iosxe"})
+
+        message = str(raised.exception)
+        self.assertIn("group_name_mapping['Cisco devices']", message)
+        # the name it would have had to be written as, so the fix is in the message
+        self.assertIn("'os_iosxe'", message)
+
+    def test_empty_mapping_target_is_rejected(self):
+        with self.assertRaises(AnsibleError) as raised:
+            self.build_plugin(group_name_mapping={"Cisco devices": ""})
+
+        self.assertIn("group_name_mapping['Cisco devices']", str(raised.exception))
+
+    def test_rejected_token_names_the_token_options(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = HttpErrorRoute(
+            401, payload={"status": "error", "message": "Unauthenticated"}
+        )
+
+        with self.assertRaises(AnsibleError) as raised:
+            self.build_plugin(routes=routes)
+
+        message = str(raised.exception)
+        self.assertIn("rejected the API token", message)
+        self.assertIn("LIBRENMS_TOKEN", message)
+
+    def test_non_json_body_error_names_the_endpoint_option(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = RawResponse(b"<html>not json</html>")
+
+        with self.assertRaises(AnsibleError) as raised:
+            self.build_plugin(routes=routes)
+
+        self.assertIn("api_endpoint", str(raised.exception))
 
 
 if __name__ == "__main__":

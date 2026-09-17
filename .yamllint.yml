@@ -1,0 +1,12 @@
+# Checks the example inventory sources that ship with this plugin. They are user-facing
+# copy-paste starting points, so a syntax error in one is a real bug.
+extends: default
+
+rules:
+  # These are documentation, not a strict schema - readability wins over house style.
+  line-length:
+    max: 120
+  comments-indentation: disable
+  document-start: disable
+  truthy:
+    check-keys: false

@@ -1,5 +1,9 @@
 # Example command line: ansible-inventory -v --list -i librenms.yml
 # Remember to export LIBRENMS_TOKEN: export LIBRENMS_TOKEN=abc
+#
+# -v reports anything that went wrong, -vvvv reports every step of the run. All of the
+# plugin's messages are prefixed with [librenms], so to follow just this plugin:
+#   ansible-inventory -vvvv --list -i librenms.yml | grep '\[librenms\]'
 plugin: librenms
 api_endpoint: https://librenms-host.local/api/v0
 validate_certs: true
@@ -15,6 +19,11 @@ exclude_ignored: true
 # Parse a device's Notes field as YAML and set the result as host vars - see the
 # README's Grouping section.
 # parse_notes_field: true
+
+# Parse the location field as <site>;[<room>];[<rack>];[[<stack_nr>]u<u_nr>];... into
+# libre_location_site / _room / _positions - see the README's "Parsing the location
+# field into rack/unit positions" section. libre_location itself is left untouched.
+# parse_location_field: true
 
 # Derive libre_hardware_family (and libre_hardware_variant) so devices can be grouped by
 # family instead of by exact product ID - see the README's "Trimming hardware to a

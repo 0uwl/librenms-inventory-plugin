@@ -71,9 +71,11 @@ Every field returned by the LibreNMS API for a device is set as a `libre_<field>
 host var (e.g. `libre_hardware`, `libre_os`, `libre_location`), except for the fields
 listed in `exclude_fields` (see [Sensitive fields](#sensitive-fields) below).
 
-Two host vars are derived rather than reported - `libre_hardware_family` and
-`libre_hardware_variant` - and only exist when
-[hardware trimming](#trimming-hardware-to-a-product-family) is configured. Every other
+Some host vars are derived rather than reported, and only exist when the option behind
+them is configured: `libre_hardware_family` and `libre_hardware_variant` from
+[hardware trimming](#trimming-hardware-to-a-product-family), and `libre_location_site`,
+`libre_location_room`, `libre_location_positions` from
+[location parsing](#parsing-the-location-field-into-rackunit-positions). Every other
 `libre_<field>` is exactly what the API returned; no option modifies one.
 
 Anything derived from those fields - e.g. `ansible_host` from `libre_hostname`, or
@@ -101,7 +103,7 @@ hardware_trimming_patterns:
     - '^[NC]?\dK-C\d+[A-Z]*'
 ```
 
-This **adds** two host vars and leaves `libre_hardware` alone:
+This **adds** two host vars and leaves `libre_hardware` unchanged:
 
 | `libre_hardware` | `os` | `libre_hardware_family` | `libre_hardware_variant` |
 | --- | --- | --- | --- |
@@ -138,18 +140,6 @@ Cisco-specific - `junos: ['^EX\d+']` gives `EX4300-48T` a family of `EX4300`.
 An invalid regular expression fails the inventory run immediately and names the pattern,
 rather than silently skipping devices.
 
-### Why `libre_hardware` is left alone
-
-The family and the variant together are lossy, so the reported product ID has to survive
-somewhere. `^WS-(C\d+[A-Z]*)` matches the `WS-` and discards it: `WS-C3850-24T` becomes a
-family of `C3850` and a variant of `24T`, and nothing recombines those into the original.
-Anything a pattern consumes without capturing is gone from both derived vars, which is
-exactly what you want for grouping and exactly what you do not want when looking up a
-spare or an end-of-life date.
-
-So `libre_hardware` keeps holding what the API returned, under every combination of these
-options, and the derived vars are additive.
-
 ### The family and the variant
 
 `libre_hardware_family` is the trimmed value. Devices whose `os` has no patterns, and
@@ -173,6 +163,7 @@ compose:
 
 Both are unset for devices LibreNMS reports no hardware for, and when
 `hardware_trimming_patterns` is not configured at all.
+`libre_hardware` remains unchanged.
 
 ### Lowercasing
 
@@ -187,6 +178,61 @@ lowercase_hardware_family: true   # -> hw_c9300, hw_n9k_c93180yc
 
 `libre_hardware` is not affected. The option does nothing unless
 `hardware_trimming_patterns` is configured.
+
+## Parsing the location field into rack/unit positions
+
+If your LibreNMS instance encodes a device's precise physical position in its
+`location` field (LibreNMS' copy of SNMP `sysLocation`), `parse_location_field` can
+break that back out into host vars instead of leaving it as one opaque string. It only
+understands one fixed format - there is nothing to configure beyond turning it on:
+
+```
+<site>;[<room>];[<rack>];[[<stack_nr>]u<u_nr>];...
+```
+
+```yaml
+# librenms.yml
+parse_location_field: true
+```
+
+`site` is required and is everything before the first `;`. `room` is an optional second
+field. Everything after that is a sequence of rack names and rack-unit positions, told
+apart by shape rather than position: a segment that is an optional number followed by
+`u` followed by a number (`u10`, `2u5`) is a unit position; anything else non-empty
+names the rack that the unit positions after it belong to, until the next rack name.
+This is what lets a stack of physically separate devices that LibreNMS reports as a
+single device (eg. a switch stack) record where each member sits - one unit position
+per member, across racks if the stack spans more than one.
+
+| `location` | Result |
+| --- | --- |
+| `DC1` | site `DC1` - the minimal valid form, not a mismatch |
+| `DC1;Room2` | site `DC1`, room `Room2` |
+| `DC1;Room2;RackA;u10` | site `DC1`, room `Room2`, one position: rack `RackA`, unit `10` |
+| `DC1;Room2;RackA;1u10;2u11` | two positions in `RackA`: unit `10` (stack member `1`), unit `11` (stack member `2`) |
+| `DC1;Room2;RackA;RackB;u5` | two positions: rack `RackA` alone (no unit given yet), then rack `RackB` with unit `5` |
+
+Sets `libre_location_site`, `libre_location_room` (only when given), and
+`libre_location_positions` - a list of dicts, one per rack and/or unit position found,
+each holding whichever of `rack`, `unit`, `stack_nr` were given for it:
+
+```yaml
+# constructed.yml, over a device with location "DC1;Room2;RackA;1u10;2u11"
+compose:
+  primary_rack: libre_location_positions[0].rack   # "RackA"
+  primary_unit: libre_location_positions[0].unit   # 10
+```
+
+A rack name with no unit position before the next rack (or the end of the value) still
+gets its own entry - `{"rack": "RackA"}` with no `unit` key - rather than being dropped,
+so "racked but the exact unit isn't tracked" is representable. A unit position with no
+rack before it (eg. a bare `DC1;Room2;u5`) is the reverse: `{"unit": 5}` with no `rack`
+key.
+
+A `location` with no site at all (starting with `;`) doesn't match the format and is
+skipped, with a `-v` warning - see [Troubleshooting](#troubleshooting) - since not every
+device in a fleet necessarily uses this scheme. `libre_location` itself is always left
+exactly as LibreNMS reported it, whether or not it was parsed.
 
 ## Sensitive fields
 
@@ -253,6 +299,83 @@ This plugin only groups by **LibreNMS device groups** - enabled by default
 LibreNMS device group it belongs to. Restrict which device groups are considered with
 `group_name_regex_filter`.
 
+### Group names
+
+LibreNMS device group names are free text, so they regularly contain characters an
+Ansible group name cannot: anything outside letters, digits and underscores, and a
+leading digit. Each rejected character becomes an underscore before the group is created:
+
+| LibreNMS device group | Ansible group | Why |
+|---|---|---|
+| `Core` | `Core` | already valid, left alone |
+| `Network Core` | `Network_Core` | |
+| `Site-1` | `Site_1` | `-` is rejected just like whitespace |
+| `Core & Dist` | `Core___Dist` | one underscore per rejected character |
+| `1st Floor` | `_1st_Floor` | a leading digit is prefixed, not overwritten |
+| `10.0.0.0/8` | `_10_0_0_0_8` | |
+| `Café Backup` | `Café_Backup` | non-ASCII letters are accepted as-is |
+
+The conversion is Ansible's own `to_safe_group_name()` - the hook the inventory base
+class exposes for exactly this - so these group names follow the same convention as any
+other inventory source. Calling it here rather than leaving it to Ansible means the names
+don't depend on the controller's `TRANSFORM_INVALID_GROUP_CHARS` setting, which defaults
+to `never`: by default Ansible only *warns* about such a name and leaves a group that can
+only be addressed by quoting it.
+
+Two things differ from what that setting would give you, both to avoid losing characters:
+
+- **A leading digit is prefixed, not overwritten.** Ansible's own substitution replaces
+  it, turning `1st Floor` into `_st_Floor`; prefixing gives `_1st_Floor`, which satisfies
+  the same rule with the name still readable.
+- **Surrounding whitespace is dropped** rather than becoming leading/trailing
+  underscores, since it is invisible in the LibreNMS UI and practically always accidental.
+
+`group_name_regex_filter` is matched against the name **as LibreNMS reports it**, before
+the conversion - write `^Network Core$`, not `^Network_Core$`.
+
+Two cases are warned about rather than silently resolved:
+
+- Device groups whose names differ only in converted characters (`Network Core` and
+  `Network-Core`) become **one** Ansible group holding both memberships.
+- A device group named `all` or `ungrouped` merges into the group Ansible creates for
+  every inventory - a host in a LibreNMS group called `ungrouped` is then reported as
+  ungrouped despite being grouped.
+
+Non-ASCII letters survive the conversion because Ansible's rule is Unicode-aware and
+accepts them, even though this plugin folds *hostnames* down to ASCII.
+
+### Renaming groups
+
+A LibreNMS group name is often not the name you want to play against. `group_name_mapping`
+renames them on the way in:
+
+```yaml
+group_name_mapping:
+  Cisco devices: os_iosxe
+  Network Core: core
+```
+
+Keys match the LibreNMS name **exactly**, case included, and before any conversion. Values
+are used as the Ansible group name **as written** - no conversion is applied to them, so
+they have to be valid Ansible group names already. One that isn't fails the run
+immediately, naming the entry and how it would have had to be written:
+
+```
+group_name_mapping['Cisco devices'] is not a valid Ansible group name: 'os iosxe' would
+have to be written 'os_iosxe'.
+```
+
+Device groups that aren't in the mapping keep their own name, converted as above. Things
+worth knowing:
+
+- **A key that matches no device group is reported at `-v`.** A mistyped key (`Cisco
+  Devices` for `Cisco devices`) would otherwise do nothing at all, silently.
+- **The regex filter runs first**, and still matches the LibreNMS name, so a group has to
+  survive `group_name_regex_filter` before it can be renamed - filter on `^Cisco devices$`,
+  not on `os_iosxe`.
+- **Mapping two device groups to one name merges them**, deliberately, and isn't warned
+  about. A mapped name landing on a name some *other* group was converted to still is.
+
 For anything else - grouping by device property (os, location, ...), composed vars
 (`ansible_host`, `ansible_network_os`, ...), or arbitrary Jinja2-based conditions - chain
 Ansible's builtin
@@ -266,6 +389,20 @@ alongside `librenms` (see `examples/ansible.cfg.example`). See
 ```bash
 ansible-inventory -v --list -i librenms.yml -i constructed.yml
 ```
+
+### Nested site/room/rack groups from a parsed location
+
+`examples/constructed.yml.dist` also has a worked `keyed_groups` example that turns
+[a parsed location](#parsing-the-location-field-into-rackunit-positions) into nested
+groups: `site_NYC`, a `site_NYC_room_Room2` child of it, and a
+`site_NYC_room_Room2_rack_RackA` child of that - one rack group per rack a device's
+`libre_location_positions` mentions. Each child's group name is prefixed with its
+parent's *full* name, not just Ansible's `parent_group` nesting on its own (which keeps
+the child's own short name) - `compose` precomputes each level's full name once, since
+building it inline in every `keyed_groups` entry that needs it would repeat the same
+concatenation three times. A host missing a level (no room, or a rack never paired with
+a unit) simply gets no group at that level or below, rather than an empty one - see the
+comments in the example file for how each entry produces that fallback.
 
 ### Grouping by data LibreNMS doesn't have (eg. environment)
 
@@ -314,6 +451,46 @@ and run all sources together:
 ansible-inventory -v --list -i librenms.yml -i constructed.yml
 ```
 
+## Troubleshooting
+
+The plugin reports what it is doing at two verbosity levels, and every message it emits
+is prefixed with `[librenms]` so it can be picked out of Ansible's own output:
+
+```bash
+# -v: only the things that went wrong
+ansible-inventory -v --list -i librenms.yml
+
+# -vvvv: every step of the run, in order
+ansible-inventory -vvvv --list -i librenms.yml | grep '\[librenms\]'
+```
+
+At `-v` the plugin reports problems that quietly degrade the inventory rather than stop
+it, so a run that "worked" but produced the wrong thing explains itself:
+
+| Message | Usual cause |
+| --- | --- |
+| `LibreNMS returned no devices` | `device_status_filter` or `query_filters` matched nothing, or the token cannot see devices |
+| `every device was filtered out` | `exclude_disabled`, `exclude_ignored` or `host_name_regex_filter` is too strict |
+| `group_name_regex_filter matched none of the device groups` | The regexes do not match any LibreNMS device group name |
+| `device <name> has no <field>, naming it <uuid>` | `hostname_field` names a field this device does not have |
+| `api_token did not resolve to a value` | The vault/extra var referenced by `api_token` is not defined |
+| `<host>: notes field is YAML but not a mapping of vars` | The Notes field parses, but not into `key: value` pairs |
+| `<host>: location field has no site` | `location` doesn't start with a site before the first `;` - see [Parsing the location field](#parsing-the-location-field-into-rackunit-positions) |
+
+At `-vvvv` every step is reported as it happens - options being applied, each API request
+and whether it came from the cache, each device that was skipped and why, the hardware
+family and variant derived for each host, and each group a host was added to.
+
+Failures that stop the run name the option to look at, for example:
+
+```
+Could not reach the LibreNMS API at https://librenms.example.com/api/v0/devices.
+Check api_endpoint, validate_certs and timeout: <urlopen error [Errno -2] Name or service not known>
+
+LibreNMS rejected the API token (HTTP 401): Unauthenticated.
+Check api_token, or the LIBRENMS_TOKEN environment variable.
+```
+
 ## Migrating from mschedrin/librenms-ansible-inventory-plugin
 
 - The plugin file now lives at `inventory_plugins/librenms.py` instead of the repo root.
@@ -324,6 +501,8 @@ ansible-inventory -v --list -i librenms.yml -i constructed.yml
 - `host_name_regex_filter`, `group_name_regex_filter`, `regex_ignore_case`,
   `exclude_disabled`, and `cache_force_update` keep the same names and behavior.
 - New: `exclude_ignored`, `hostname_field`, `device_status_filter`, `query_filters`.
+- Device group names containing whitespace now become valid Ansible group names
+  (`Network Core` -> `Network_Core`), see [Group names](#group-names).
 - Property-based grouping and vars like `ansible_host`/`ansible_network_os` are no
   longer built into this plugin - chain Ansible's standard `constructed` inventory
   plugin as a second source instead (see [Grouping](#grouping)).
@@ -366,3 +545,50 @@ device payload, LibreNMS device-group membership
 (including the case where an instance has zero device groups, which some LibreNMS
 versions signal with an HTTP 404 rather than an empty list), and a real `ansible-inventory
 --list` subprocess run.
+
+## Linting
+
+```bash
+pip install -r requirements-dev.txt
+
+ruff check .
+yamllint .github/workflows examples/*.yml.dist
+```
+
+Configuration lives in `ruff.toml` and `.yamllint.yml`. Both files carry the reasoning
+for each ignore, the notable one being that `inventory_plugins/*.py` is exempt from
+`E402` and the pyupgrade rules: an Ansible plugin has to define `DOCUMENTATION` and
+`EXAMPLES` before its imports, and the Python 2 compatibility preamble is conventional
+in plugin modules.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request against `main`, and on pushes to
+`main`. It has three jobs:
+
+| Job | What it checks |
+| --- | --- |
+| **Lint** | `ruff check` over the plugin and tests, `yamllint` over the workflows and the example inventory sources |
+| **Plugin documentation** | `DOCUMENTATION` and `EXAMPLES` parse as YAML, and `ansible-doc -t inventory librenms` renders - a malformed docstring stops Ansible registering the plugin's options at all |
+| **Unit tests** | `tests/unit` on Python 3.12 and 3.13 |
+
+Only the unit tests run in CI. `tests/integration` needs a reachable LibreNMS instance
+and skips itself without one, so running it on a GitHub runner would prove nothing.
+
+CI installs `requirements-dev.txt`, which pins the linter versions, so a clean local run
+means a clean CI run.
+
+### Requiring CI before a merge
+
+The workflow alone does not block merges - that is a repository setting. The jobs
+aggregate into a single `CI` check so only one entry has to be required:
+
+**Settings → Branches → Add branch ruleset**, targeting `main`:
+
+- Enable **Require a pull request before merging**
+- Enable **Require status checks to pass**, and add `CI` as a required check
+- Enable **Block force pushes**
+
+The `CI` job fails if any of Lint, Plugin documentation, or Unit tests fails or is
+cancelled, so requiring it covers all of them - including new matrix entries added
+later, which would otherwise each need adding to the required list by hand.

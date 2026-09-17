@@ -1,0 +1,6 @@
+# Tooling for linting and running the test suite. CI installs exactly this file, so a
+# clean local run means a clean CI run.
+-r requirements.txt
+
+ruff==0.16.5
+yamllint==1.38.0

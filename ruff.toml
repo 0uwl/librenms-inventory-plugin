@@ -1,0 +1,33 @@
+# Lint configuration for the librenms inventory plugin. Run locally with:
+#   ruff check .
+# CI runs the same command, so a clean local run means a clean CI run.
+
+line-length = 120
+target-version = "py312"  # ansible-core 2.19+ requires Python 3.12 on the controller
+
+exclude = [".venv", ".git"]
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes: undefined names, unused imports
+    "I",    # import sorting
+    "B",    # bugbear: likely bugs
+    "UP",   # pyupgrade: outdated syntax
+    "C4",   # comprehension clean-ups
+    "SIM",  # simplifiable constructs
+]
+
+[lint.per-file-ignores]
+# Ansible plugin boilerplate. A plugin module must define DOCUMENTATION/EXAMPLES before
+# its imports (E402), and the Python 2 compatibility preamble - the __future__ imports,
+# __metaclass__ and the explicit super() arguments - is conventional in plugin modules
+# even though it is redundant on the Python versions ansible-core now supports.
+"inventory_plugins/*.py" = ["E402", "UP001", "UP008", "UP010"]
+
+# Test scaffolding. The fake open_url and Display stand-ins have to accept the real
+# signatures whether or not each test looks at every argument, and the temp-file
+# helpers deliberately outlive the block that opens them, with cleanup registered
+# through addCleanup instead of a context manager.
+"tests/*.py" = ["ARG001", "ARG002", "SIM105", "SIM108", "SIM115"]
