@@ -305,15 +305,15 @@ LibreNMS device group names are free text, so they regularly contain characters 
 Ansible group name cannot: anything outside letters, digits and underscores, and a
 leading digit. Each rejected character becomes an underscore before the group is created:
 
-```yaml
-# LibreNMS device group -> Ansible group
-# Core                  -> Core
-# Network Core          -> Network_Core
-# Site-1                -> Site_1
-# Core & Dist           -> Core___Dist
-# 1st Floor             -> _1st_Floor
-# 10.0.0.0/8            -> _10_0_0_0_8
-```
+| LibreNMS device group | Ansible group | Why |
+|---|---|---|
+| `Core` | `Core` | already valid, left alone |
+| `Network Core` | `Network_Core` | |
+| `Site-1` | `Site_1` | `-` is rejected just like whitespace |
+| `Core & Dist` | `Core___Dist` | one underscore per rejected character |
+| `1st Floor` | `_1st_Floor` | a leading digit is prefixed, not overwritten |
+| `10.0.0.0/8` | `_10_0_0_0_8` | |
+| `Café Backup` | `Café_Backup` | non-ASCII letters are accepted as-is |
 
 The conversion is Ansible's own `to_safe_group_name()` - the hook the inventory base
 class exposes for exactly this - so these group names follow the same convention as any
@@ -341,8 +341,8 @@ Two cases are warned about rather than silently resolved:
   every inventory - a host in a LibreNMS group called `ungrouped` is then reported as
   ungrouped despite being grouped.
 
-Non-ASCII letters are left as they are (`Café Backup` -> `Café_Backup`): Ansible's rule is
-Unicode-aware and accepts them, even though this plugin folds *hostnames* down to ASCII.
+Non-ASCII letters survive the conversion because Ansible's rule is Unicode-aware and
+accepts them, even though this plugin folds *hostnames* down to ASCII.
 
 For anything else - grouping by device property (os, location, ...), composed vars
 (`ansible_host`, `ansible_network_os`, ...), or arbitrary Jinja2-based conditions - chain
