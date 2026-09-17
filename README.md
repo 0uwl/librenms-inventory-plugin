@@ -299,6 +299,83 @@ This plugin only groups by **LibreNMS device groups** - enabled by default
 LibreNMS device group it belongs to. Restrict which device groups are considered with
 `group_name_regex_filter`.
 
+### Group names
+
+LibreNMS device group names are free text, so they regularly contain characters an
+Ansible group name cannot: anything outside letters, digits and underscores, and a
+leading digit. Each rejected character becomes an underscore before the group is created:
+
+| LibreNMS device group | Ansible group | Why |
+|---|---|---|
+| `Core` | `Core` | already valid, left alone |
+| `Network Core` | `Network_Core` | |
+| `Site-1` | `Site_1` | `-` is rejected just like whitespace |
+| `Core & Dist` | `Core___Dist` | one underscore per rejected character |
+| `1st Floor` | `_1st_Floor` | a leading digit is prefixed, not overwritten |
+| `10.0.0.0/8` | `_10_0_0_0_8` | |
+| `Café Backup` | `Café_Backup` | non-ASCII letters are accepted as-is |
+
+The conversion is Ansible's own `to_safe_group_name()` - the hook the inventory base
+class exposes for exactly this - so these group names follow the same convention as any
+other inventory source. Calling it here rather than leaving it to Ansible means the names
+don't depend on the controller's `TRANSFORM_INVALID_GROUP_CHARS` setting, which defaults
+to `never`: by default Ansible only *warns* about such a name and leaves a group that can
+only be addressed by quoting it.
+
+Two things differ from what that setting would give you, both to avoid losing characters:
+
+- **A leading digit is prefixed, not overwritten.** Ansible's own substitution replaces
+  it, turning `1st Floor` into `_st_Floor`; prefixing gives `_1st_Floor`, which satisfies
+  the same rule with the name still readable.
+- **Surrounding whitespace is dropped** rather than becoming leading/trailing
+  underscores, since it is invisible in the LibreNMS UI and practically always accidental.
+
+`group_name_regex_filter` is matched against the name **as LibreNMS reports it**, before
+the conversion - write `^Network Core$`, not `^Network_Core$`.
+
+Two cases are warned about rather than silently resolved:
+
+- Device groups whose names differ only in converted characters (`Network Core` and
+  `Network-Core`) become **one** Ansible group holding both memberships.
+- A device group named `all` or `ungrouped` merges into the group Ansible creates for
+  every inventory - a host in a LibreNMS group called `ungrouped` is then reported as
+  ungrouped despite being grouped.
+
+Non-ASCII letters survive the conversion because Ansible's rule is Unicode-aware and
+accepts them, even though this plugin folds *hostnames* down to ASCII.
+
+### Renaming groups
+
+A LibreNMS group name is often not the name you want to play against. `group_name_mapping`
+renames them on the way in:
+
+```yaml
+group_name_mapping:
+  Cisco devices: os_iosxe
+  Network Core: core
+```
+
+Keys match the LibreNMS name **exactly**, case included, and before any conversion. Values
+are used as the Ansible group name **as written** - no conversion is applied to them, so
+they have to be valid Ansible group names already. One that isn't fails the run
+immediately, naming the entry and how it would have had to be written:
+
+```
+group_name_mapping['Cisco devices'] is not a valid Ansible group name: 'os iosxe' would
+have to be written 'os_iosxe'.
+```
+
+Device groups that aren't in the mapping keep their own name, converted as above. Things
+worth knowing:
+
+- **A key that matches no device group is reported at `-v`.** A mistyped key (`Cisco
+  Devices` for `Cisco devices`) would otherwise do nothing at all, silently.
+- **The regex filter runs first**, and still matches the LibreNMS name, so a group has to
+  survive `group_name_regex_filter` before it can be renamed - filter on `^Cisco devices$`,
+  not on `os_iosxe`.
+- **Mapping two device groups to one name merges them**, deliberately, and isn't warned
+  about. A mapped name landing on a name some *other* group was converted to still is.
+
 For anything else - grouping by device property (os, location, ...), composed vars
 (`ansible_host`, `ansible_network_os`, ...), or arbitrary Jinja2-based conditions - chain
 Ansible's builtin
@@ -424,6 +501,8 @@ Check api_token, or the LIBRENMS_TOKEN environment variable.
 - `host_name_regex_filter`, `group_name_regex_filter`, `regex_ignore_case`,
   `exclude_disabled`, and `cache_force_update` keep the same names and behavior.
 - New: `exclude_ignored`, `hostname_field`, `device_status_filter`, `query_filters`.
+- Device group names containing whitespace now become valid Ansible group names
+  (`Network Core` -> `Network_Core`), see [Group names](#group-names).
 - Property-based grouping and vars like `ansible_host`/`ansible_network_os` are no
   longer built into this plugin - chain Ansible's standard `constructed` inventory
   plugin as a second source instead (see [Grouping](#grouping)).

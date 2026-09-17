@@ -13,14 +13,17 @@ Run with:
 
 import json
 import os
+import re
 import ssl
 import subprocess
 import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from ansible.inventory.data import InventoryData
+from ansible.inventory.group import to_safe_group_name
 from ansible.parsing.dataloader import DataLoader
 from ansible.plugins.loader import inventory_loader
 
@@ -162,6 +165,27 @@ class TestLiveDevices(LiveLibrenmsTestCase):
         self.assertEqual(host_vars["libre_os"], sample["os"])
 
 
+def expected_group_name(raw_name):
+    """The Ansible group name a LibreNMS device group is documented to end up under
+
+    Spelled out from Ansible's own to_safe_group_name() and the two deviations the
+    plugin documents, rather than calling the plugin, so that this stays an independent
+    expectation to check the live run against.
+
+    Args:
+        raw_name (str): The device group name as the LibreNMS API reports it
+
+    Returns:
+        str: The expected Ansible group name, empty if nothing is left to name a group
+    """
+    name = raw_name.strip()
+    if not name:
+        return ""
+    if re.match(r"\d", name):
+        name = "_" + name
+    return to_safe_group_name(name, force=True, silent=True)
+
+
 class TestLiveGrouping(LiveLibrenmsTestCase):
     def test_device_group_membership_matches_raw_api(self):
         raw_groups_response = _raw_get("/devicegroups")
@@ -182,13 +206,28 @@ class TestLiveGrouping(LiveLibrenmsTestCase):
             self.assertEqual(ansible_device_groups, set())
             return
 
-        self.assertEqual(ansible_device_groups, raw_group_names)
+        # LibreNMS group names are free text, so the ground truth has to be put through
+        # the same conversion the plugin documents before it can be compared.
+        expected_by_ansible_name = {}
+        for raw_name in raw_group_names:
+            ansible_name = expected_group_name(raw_name)
+            if ansible_name:
+                # A name that converts to nothing is skipped by the plugin, and two names
+                # that converge share one group - keep the first, its members are checked
+                # against the union below.
+                expected_by_ansible_name.setdefault(ansible_name, []).append(raw_name)
 
-        for group_name in raw_group_names:
-            raw_members = _raw_get("/devicegroups/" + group_name).get("devices", [])
-            expected_member_ids = {int(d["device_id"]) for d in raw_members}
+        self.assertEqual(ansible_device_groups, set(expected_by_ansible_name))
+
+        for ansible_name, raw_names in expected_by_ansible_name.items():
+            expected_member_ids = set()
+            for raw_name in raw_names:
+                raw_members = _raw_get(
+                    "/devicegroups/" + urllib.parse.quote(raw_name, safe="")
+                ).get("devices", [])
+                expected_member_ids.update(int(d["device_id"]) for d in raw_members)
             actual_member_ids = {
-                h.get_vars()["libre_device_id"] for h in inventory.groups[group_name].get_hosts()
+                h.get_vars()["libre_device_id"] for h in inventory.groups[ansible_name].get_hosts()
             }
             self.assertEqual(actual_member_ids, expected_member_ids)
 
