@@ -108,6 +108,12 @@ DOCUMENTATION = r"""
             description:
                 - Add each device to an Ansible group per LibreNMS device group it belongs to
                   (subject to I(group_name_regex_filter)).
+                - LibreNMS device group names may contain whitespace, which is not valid in an
+                  Ansible group name. Each run of whitespace in the name is replaced with a
+                  single underscore before the group is created, so a LibreNMS group of
+                  C(Network Core) becomes the Ansible group C(Network_Core). Regex filters in
+                  I(group_name_regex_filter) still match against the name as LibreNMS reports
+                  it, not the converted one.
             type: bool
             default: true
         exclude_fields:
@@ -219,6 +225,8 @@ cache_timeout: 600
 exclude_disabled: true
 exclude_ignored: true
 
+# Matched against the group name as LibreNMS reports it. Whitespace in a matching
+# group's name becomes underscores in the Ansible group name, eg. `Network_Core`.
 group_name_regex_filter:
   - ^Network Core$
   - ^Site .*$
@@ -252,6 +260,7 @@ import json
 import re
 import unicodedata
 import urllib.error
+import urllib.parse
 import uuid
 from collections import defaultdict
 
@@ -511,7 +520,10 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         # Fetch the members of each fetched group and map them together
         for group in groups:
             self._step(f"fetching members of device group {group['name']}")
-            member_payload = self._fetch(self.api_endpoint + "/devicegroups/" + group["name"])
+            # The name goes into the URL path, so it has to be quoted - LibreNMS group
+            # names are free text and may contain whitespace or other unsafe characters.
+            quoted_name = urllib.parse.quote(group["name"], safe="")
+            member_payload = self._fetch(self.api_endpoint + "/devicegroups/" + quoted_name)
             members = member_payload.get("devices", [])
             self._step(f"device group {group['name']} has {len(members)} members")
             for device in members:
@@ -876,6 +888,25 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
     # --- Grouping -----------------------------------------------------
 
+    @staticmethod
+    def _safe_group_name(group_name):
+        """Convert a LibreNMS device group name into a safe Ansible group name
+
+        LibreNMS group names are free text, so they regularly contain whitespace, which
+        an Ansible group name cannot. Ansible's own handling of that depends on the
+        TRANSFORM_INVALID_GROUP_CHARS setting - it may warn, or leave a group that can
+        only be addressed by quoting it - so the conversion is done here instead, giving
+        the same group names regardless of how the controller is configured.
+
+        Args:
+            group_name (str): The device group name as reported by LibreNMS
+
+        Returns:
+            str: The name with each run of whitespace replaced by a single underscore,
+                and surrounding whitespace dropped rather than turned into underscores
+        """
+        return re.sub(r"\s+", "_", group_name.strip())
+
     def _add_host_to_device_groups(self, device_id, hostname, membership):
         """Add a host to groups according to its LibreNMS group memberships
 
@@ -885,8 +916,18 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             membership (dict): A mapping of device IDs to their corresponding group memberships
         """
         for group_name in membership.get(device_id, []):
-            # Let Ansible transform the LibreNMS group name
-            transformed_group_name = self.inventory.add_group(group_name)
+            # Convert the LibreNMS group name into one Ansible accepts
+            safe_group_name = self._safe_group_name(group_name)
+            if not safe_group_name:
+                # Nothing but whitespace is left to name a group with, and an empty name
+                # would fail the whole run in add_group()
+                self.display.warning(
+                    f"[librenms] skipping device group {group_name!r}: its name is empty "
+                    f"once whitespace is converted"
+                )
+                continue
+            # Let Ansible transform whatever is left that it considers unsafe
+            transformed_group_name = self.inventory.add_group(safe_group_name)
             self._step(f"adding {hostname} to group {transformed_group_name}")
             # Add the host to the group
             self.inventory.add_host(group=transformed_group_name, host=hostname)

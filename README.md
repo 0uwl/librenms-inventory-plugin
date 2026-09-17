@@ -299,6 +299,30 @@ This plugin only groups by **LibreNMS device groups** - enabled by default
 LibreNMS device group it belongs to. Restrict which device groups are considered with
 `group_name_regex_filter`.
 
+### Group names
+
+LibreNMS device group names are free text and regularly contain whitespace, which an
+Ansible group name cannot. Every run of whitespace in the name is replaced with a single
+underscore, and surrounding whitespace is dropped, so the LibreNMS group `Network Core`
+becomes the Ansible group `Network_Core`:
+
+```yaml
+# LibreNMS device group -> Ansible group
+# Core                  -> Core
+# Network Core          -> Network_Core
+# Site 1  Uplink        -> Site_1_Uplink
+```
+
+`group_name_regex_filter` is matched against the name **as LibreNMS reports it**, before
+the conversion - write `^Network Core$`, not `^Network_Core$`.
+
+Doing this in the plugin means the group names don't depend on the controller's
+`TRANSFORM_INVALID_GROUP_CHARS` setting, which otherwise decides whether Ansible warns
+about such a name, silently rewrites it, or leaves a group that can only be addressed by
+quoting it. Only whitespace is converted; other characters Ansible considers invalid in a
+group name (`-`, `.`, ...) are still left to that setting, so a LibreNMS group named
+`Site-1` reaches Ansible as-is.
+
 For anything else - grouping by device property (os, location, ...), composed vars
 (`ansible_host`, `ansible_network_os`, ...), or arbitrary Jinja2-based conditions - chain
 Ansible's builtin
@@ -424,6 +448,8 @@ Check api_token, or the LIBRENMS_TOKEN environment variable.
 - `host_name_regex_filter`, `group_name_regex_filter`, `regex_ignore_case`,
   `exclude_disabled`, and `cache_force_update` keep the same names and behavior.
 - New: `exclude_ignored`, `hostname_field`, `device_status_filter`, `query_filters`.
+- Device group names containing whitespace now become valid Ansible group names
+  (`Network Core` -> `Network_Core`), see [Group names](#group-names).
 - Property-based grouping and vars like `ansible_host`/`ansible_network_os` are no
   longer built into this plugin - chain Ansible's standard `constructed` inventory
   plugin as a second source instead (see [Grouping](#grouping)).

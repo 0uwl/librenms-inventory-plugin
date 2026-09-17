@@ -13,11 +13,13 @@ Run with:
 
 import json
 import os
+import re
 import ssl
 import subprocess
 import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from ansible.inventory.data import InventoryData
@@ -182,13 +184,21 @@ class TestLiveGrouping(LiveLibrenmsTestCase):
             self.assertEqual(ansible_device_groups, set())
             return
 
-        self.assertEqual(ansible_device_groups, raw_group_names)
+        # LibreNMS group names are free text; the plugin turns whitespace in them into
+        # underscores, so the ground truth has to be converted the same way.
+        expected_by_ansible_name = {
+            re.sub(r"\s+", "_", name.strip()): name for name in raw_group_names
+        }
 
-        for group_name in raw_group_names:
-            raw_members = _raw_get("/devicegroups/" + group_name).get("devices", [])
+        self.assertEqual(ansible_device_groups, set(expected_by_ansible_name))
+
+        for ansible_name, raw_name in expected_by_ansible_name.items():
+            raw_members = _raw_get(
+                "/devicegroups/" + urllib.parse.quote(raw_name, safe="")
+            ).get("devices", [])
             expected_member_ids = {int(d["device_id"]) for d in raw_members}
             actual_member_ids = {
-                h.get_vars()["libre_device_id"] for h in inventory.groups[group_name].get_hosts()
+                h.get_vars()["libre_device_id"] for h in inventory.groups[ansible_name].get_hosts()
             }
             self.assertEqual(actual_member_ids, expected_member_ids)
 

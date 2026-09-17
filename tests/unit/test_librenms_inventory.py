@@ -34,11 +34,16 @@ def load_fixture(name):
         return json.load(f)
 
 
+# The LibreNMS group name " Network  Core " is deliberately padded and double-spaced; it
+# reaches the API URL-quoted and lands in the inventory as the group "Network_Core".
+NETWORK_CORE_ROUTE = "/devicegroups/%20Network%20%20Core%20"
+
 DEFAULT_ROUTES = {
     "/devices": "devices.json",
     "/devicegroups/Core": "devicegroups_core.json",
     "/devicegroups/Edge": "devicegroups_edge.json",
     "/devicegroups/Decommissioned": "devicegroups_decommissioned.json",
+    NETWORK_CORE_ROUTE: "devicegroups_network_core.json",
     # order matters: must be checked after the more specific /devicegroups/<name> routes
     "/devicegroups": "devicegroups.json",
 }
@@ -587,6 +592,40 @@ class TestGrouping(LibrenmsInventoryTestCase):
         # Only the Core membership endpoint should have been queried, not Edge/Decommissioned
         self.assertTrue(any(url.endswith("/devicegroups/Core") for url in call_log))
         self.assertFalse(any(url.endswith("/devicegroups/Edge") for url in call_log))
+
+    def test_group_name_whitespace_becomes_underscores(self):
+        _, inventory = self.build_plugin(group_name_regex_filter=[r"^\s*Network"])
+
+        # " Network  Core " - padding dropped, the run of spaces collapsed into one "_"
+        self.assertIn("Network_Core", inventory.groups)
+        self.assertEqual(
+            [h.name for h in inventory.groups["Network_Core"].get_hosts()], ["core-sw1"]
+        )
+
+    def test_group_name_is_url_quoted_when_fetching_members(self):
+        call_log = []
+        self.build_plugin(call_log=call_log, group_name_regex_filter=[r"^\s*Network"])
+
+        # Raw whitespace in the path would make the HTTP request itself invalid
+        self.assertTrue(any(url.endswith(NETWORK_CORE_ROUTE) for url in call_log), call_log)
+
+    def test_whitespace_only_group_name_is_skipped(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups"] = "devicegroups_blank_name.json"
+        routes["/devicegroups/%20%20"] = "devicegroups_core.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        # Nothing is left to name a group with, and an empty name would fail the run
+        self.assertEqual(set(inventory.groups.keys()), {"all", "ungrouped"})
+        self.assertIn("core-sw1", inventory.hosts)
+
+    def test_group_name_regex_filter_matches_the_librenms_name(self):
+        # The filter is documented to run against the name as LibreNMS reports it, so a
+        # pattern written against the converted name must not match.
+        _, inventory = self.build_plugin(group_name_regex_filter=["^Network_Core$"])
+
+        self.assertNotIn("Network_Core", inventory.groups)
 
     def test_devicegroups_no_members_quirk_does_not_raise(self):
         # The "Decommissioned" fixture returns LibreNMS' odd error-shaped empty response.
