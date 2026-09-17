@@ -301,27 +301,48 @@ LibreNMS device group it belongs to. Restrict which device groups are considered
 
 ### Group names
 
-LibreNMS device group names are free text and regularly contain whitespace, which an
-Ansible group name cannot. Every run of whitespace in the name is replaced with a single
-underscore, and surrounding whitespace is dropped, so the LibreNMS group `Network Core`
-becomes the Ansible group `Network_Core`:
+LibreNMS device group names are free text, so they regularly contain characters an
+Ansible group name cannot: anything outside letters, digits and underscores, and a
+leading digit. Each rejected character becomes an underscore before the group is created:
 
 ```yaml
 # LibreNMS device group -> Ansible group
 # Core                  -> Core
 # Network Core          -> Network_Core
-# Site 1  Uplink        -> Site_1_Uplink
+# Site-1                -> Site_1
+# Core & Dist           -> Core___Dist
+# 1st Floor             -> _1st_Floor
+# 10.0.0.0/8            -> _10_0_0_0_8
 ```
+
+The conversion is Ansible's own `to_safe_group_name()` - the hook the inventory base
+class exposes for exactly this - so these group names follow the same convention as any
+other inventory source. Calling it here rather than leaving it to Ansible means the names
+don't depend on the controller's `TRANSFORM_INVALID_GROUP_CHARS` setting, which defaults
+to `never`: by default Ansible only *warns* about such a name and leaves a group that can
+only be addressed by quoting it.
+
+Two things differ from what that setting would give you, both to avoid losing characters:
+
+- **A leading digit is prefixed, not overwritten.** Ansible's own substitution replaces
+  it, turning `1st Floor` into `_st_Floor`; prefixing gives `_1st_Floor`, which satisfies
+  the same rule with the name still readable.
+- **Surrounding whitespace is dropped** rather than becoming leading/trailing
+  underscores, since it is invisible in the LibreNMS UI and practically always accidental.
 
 `group_name_regex_filter` is matched against the name **as LibreNMS reports it**, before
 the conversion - write `^Network Core$`, not `^Network_Core$`.
 
-Doing this in the plugin means the group names don't depend on the controller's
-`TRANSFORM_INVALID_GROUP_CHARS` setting, which otherwise decides whether Ansible warns
-about such a name, silently rewrites it, or leaves a group that can only be addressed by
-quoting it. Only whitespace is converted; other characters Ansible considers invalid in a
-group name (`-`, `.`, ...) are still left to that setting, so a LibreNMS group named
-`Site-1` reaches Ansible as-is.
+Two cases are warned about rather than silently resolved:
+
+- Device groups whose names differ only in converted characters (`Network Core` and
+  `Network-Core`) become **one** Ansible group holding both memberships.
+- A device group named `all` or `ungrouped` merges into the group Ansible creates for
+  every inventory - a host in a LibreNMS group called `ungrouped` is then reported as
+  ungrouped despite being grouped.
+
+Non-ASCII letters are left as they are (`Café Backup` -> `Café_Backup`): Ansible's rule is
+Unicode-aware and accepts them, even though this plugin folds *hostnames* down to ASCII.
 
 For anything else - grouping by device property (os, location, ...), composed vars
 (`ansible_host`, `ansible_network_os`, ...), or arbitrary Jinja2-based conditions - chain

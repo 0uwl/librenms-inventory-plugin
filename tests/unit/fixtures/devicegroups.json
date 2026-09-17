@@ -4,6 +4,6 @@
         {"id": 1, "name": "Core"},
         {"id": 2, "name": "Edge"},
         {"id": 3, "name": "Decommissioned"},
-        {"id": 4, "name": " Network  Core "}
+        {"id": 4, "name": "Network Core"}
     ]
 }

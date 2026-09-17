@@ -1,0 +1,25 @@
+{
+    "status": "ok",
+    "groups": [
+        {
+            "id": 1,
+            "name": " Site 1 "
+        },
+        {
+            "id": 2,
+            "name": "Site-2"
+        },
+        {
+            "id": 3,
+            "name": "1st Floor"
+        },
+        {
+            "id": 4,
+            "name": "Core & Dist"
+        },
+        {
+            "id": 5,
+            "name": "10.0.0.0/8"
+        }
+    ]
+}
