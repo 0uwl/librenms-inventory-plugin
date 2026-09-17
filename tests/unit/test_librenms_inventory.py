@@ -666,6 +666,53 @@ class TestGrouping(LibrenmsInventoryTestCase):
         self.assertEqual(set(inventory.groups.keys()), {"all", "ungrouped"})
         self.assertIn("core-sw1", [h.name for h in inventory.groups["ungrouped"].get_hosts()])
 
+    def test_mapped_group_gets_the_name_it_was_mapped_to(self):
+        _, inventory = self.build_plugin(group_name_mapping={"Core": "os_iosxe"})
+
+        self.assertIn("os_iosxe", inventory.groups)
+        self.assertNotIn("Core", inventory.groups)
+        self.assertEqual(
+            {h.name for h in inventory.groups["os_iosxe"].get_hosts()}, {"core-sw1", "core-sw2"}
+        )
+
+    def test_mapping_applies_to_names_that_would_be_converted(self):
+        _, inventory = self.build_plugin(group_name_mapping={"Network Core": "core"})
+
+        # The mapped name is used as written, the conversion never sees it
+        self.assertIn("core", inventory.groups)
+        self.assertNotIn("Network_Core", inventory.groups)
+
+    def test_mapping_keys_match_the_librenms_name_exactly(self):
+        _, inventory = self.build_plugin(
+            group_name_mapping={"core": "wrong_case", "Network_Core": "converted_name"}
+        )
+
+        # Neither key is a device group name: LibreNMS reports "Core" and "Network Core"
+        self.assertEqual(set(inventory.groups) - {"all", "ungrouped"}, {"Core", "Network_Core"})
+
+    def test_unmapped_groups_keep_their_own_name(self):
+        _, inventory = self.build_plugin(group_name_mapping={"Core": "os_iosxe"})
+
+        self.assertIn("Network_Core", inventory.groups)
+
+    def test_mapping_is_applied_after_the_regex_filter(self):
+        _, inventory = self.build_plugin(
+            group_name_regex_filter=["^Core$"], group_name_mapping={"Core": "os_iosxe"}
+        )
+
+        # The filter matches the LibreNMS name, the mapping renames what survives it
+        self.assertEqual(set(inventory.groups) - {"all", "ungrouped"}, {"os_iosxe"})
+
+    def test_mapping_two_groups_to_one_name_merges_them(self):
+        _, inventory = self.build_plugin(
+            group_name_mapping={"Core": "cisco", "Network Core": "cisco"}
+        )
+
+        self.assertEqual(set(inventory.groups) - {"all", "ungrouped"}, {"cisco"})
+        self.assertEqual(
+            {h.name for h in inventory.groups["cisco"].get_hosts()}, {"core-sw1", "core-sw2"}
+        )
+
     def test_group_name_regex_filter_matches_the_librenms_name(self):
         # The filter is documented to run against the name as LibreNMS reports it, so a
         # pattern written against the converted name must not match.
@@ -1002,7 +1049,7 @@ class TestDisplayMessages(LibrenmsInventoryTestCase):
         _, _, warnings = self.capture_display(routes=routes)
 
         self.assertTrue(
-            any("both convert to the group name Network_Core" in m for m in warnings), warnings
+            any("both end up as the group Network_Core" in m for m in warnings), warnings
         )
 
     def test_group_named_after_an_implicit_group_warns(self):
@@ -1015,6 +1062,34 @@ class TestDisplayMessages(LibrenmsInventoryTestCase):
         self.assertTrue(
             any("same name as the group Ansible creates" in m for m in warnings), warnings
         )
+
+    def test_mapping_key_matching_no_device_group_is_reported_at_v(self):
+        _, problems, _ = self.capture_display(group_name_mapping={"Cisco devices": "os_iosxe"})
+
+        self.assertTrue(
+            any("matched no device group for 'Cisco devices'" in m for m in problems), problems
+        )
+
+    def test_merging_two_groups_by_mapping_does_not_warn(self):
+        _, _, warnings = self.capture_display(
+            group_name_mapping={"Core": "cisco", "Network Core": "cisco"}
+        )
+
+        # Mapping both onto one name is what the user asked for, unlike two names that
+        # happen to convert to the same thing
+        self.assertFalse(any("end up as the group" in m for m in warnings), warnings)
+
+    def test_mapping_onto_a_converted_name_still_warns(self):
+        _, _, warnings = self.capture_display(group_name_mapping={"Core": "Network_Core"})
+
+        self.assertTrue(
+            any("both end up as the group Network_Core" in m for m in warnings), warnings
+        )
+
+    def test_mapped_group_name_is_reported_at_vvvv(self):
+        steps, _, _ = self.capture_display(group_name_mapping={"Core": "os_iosxe"})
+
+        self.assertTrue(any("Core is named os_iosxe" in m for m in steps), steps)
 
     def test_converted_group_name_is_reported_at_vvvv(self):
         steps, _, _ = self.capture_display()
@@ -1050,6 +1125,21 @@ class TestErrorMessages(LibrenmsInventoryTestCase):
         message = str(raised.exception)
         self.assertIn("Could not reach the LibreNMS API", message)
         self.assertIn("api_endpoint", message)
+
+    def test_invalid_mapping_target_names_the_entry(self):
+        with self.assertRaises(AnsibleError) as raised:
+            self.build_plugin(group_name_mapping={"Cisco devices": "os iosxe"})
+
+        message = str(raised.exception)
+        self.assertIn("group_name_mapping['Cisco devices']", message)
+        # the name it would have had to be written as, so the fix is in the message
+        self.assertIn("'os_iosxe'", message)
+
+    def test_empty_mapping_target_is_rejected(self):
+        with self.assertRaises(AnsibleError) as raised:
+            self.build_plugin(group_name_mapping={"Cisco devices": ""})
+
+        self.assertIn("group_name_mapping['Cisco devices']", str(raised.exception))
 
     def test_rejected_token_names_the_token_options(self):
         routes = dict(DEFAULT_ROUTES)

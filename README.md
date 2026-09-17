@@ -344,6 +344,38 @@ Two cases are warned about rather than silently resolved:
 Non-ASCII letters survive the conversion because Ansible's rule is Unicode-aware and
 accepts them, even though this plugin folds *hostnames* down to ASCII.
 
+### Renaming groups
+
+A LibreNMS group name is often not the name you want to play against. `group_name_mapping`
+renames them on the way in:
+
+```yaml
+group_name_mapping:
+  Cisco devices: os_iosxe
+  Network Core: core
+```
+
+Keys match the LibreNMS name **exactly**, case included, and before any conversion. Values
+are used as the Ansible group name **as written** - no conversion is applied to them, so
+they have to be valid Ansible group names already. One that isn't fails the run
+immediately, naming the entry and how it would have had to be written:
+
+```
+group_name_mapping['Cisco devices'] is not a valid Ansible group name: 'os iosxe' would
+have to be written 'os_iosxe'.
+```
+
+Device groups that aren't in the mapping keep their own name, converted as above. Things
+worth knowing:
+
+- **A key that matches no device group is reported at `-v`.** A mistyped key (`Cisco
+  Devices` for `Cisco devices`) would otherwise do nothing at all, silently.
+- **The regex filter runs first**, and still matches the LibreNMS name, so a group has to
+  survive `group_name_regex_filter` before it can be renamed - filter on `^Cisco devices$`,
+  not on `os_iosxe`.
+- **Mapping two device groups to one name merges them**, deliberately, and isn't warned
+  about. A mapped name landing on a name some *other* group was converted to still is.
+
 For anything else - grouping by device property (os, location, ...), composed vars
 (`ansible_host`, `ansible_network_os`, ...), or arbitrary Jinja2-based conditions - chain
 Ansible's builtin

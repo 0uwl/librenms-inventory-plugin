@@ -88,6 +88,26 @@ DOCUMENTATION = r"""
             type: list
             elements: str
             default: []
+        group_name_mapping:
+            description:
+                - Mapping of LibreNMS device group name to the Ansible group name it should
+                  be created under, so that a device group of C(Cisco devices) can be the
+                  Ansible group C(os_iosxe). Device groups that are not in the mapping keep
+                  their own name.
+                - Keys match the LibreNMS name exactly, case included, and before any
+                  conversion. A key matching no device group is reported at C(-v), since a
+                  mistyped one would otherwise do nothing at all.
+                - Values are used as given, so they must already be valid Ansible group
+                  names. One that is not fails the inventory run immediately, naming the
+                  entry and what it would have had to become.
+                - Applied after I(group_name_regex_filter), which keeps matching against the
+                  LibreNMS name - a device group has to survive the filter before it can be
+                  renamed.
+                - Mapping two device groups to the same name merges them deliberately and is
+                  not reported. A mapped name landing on a name some other device group was
+                  converted to still is.
+            type: dict
+            default: {}
         host_name_regex_filter:
             description:
                 - List of regexes. Only devices whose C(sysName)/C(hostname) matches at least
@@ -238,6 +258,12 @@ exclude_ignored: true
 group_name_regex_filter:
   - ^Network Core$
   - ^Site .*$
+
+# Rename device groups on the way in. Keys are the LibreNMS name, exactly as the API
+# reports it; values are used as the Ansible group name as given.
+group_name_mapping:
+  Cisco devices: os_iosxe
+  Network Core: core
 
 # For property-based grouping (os, location, ...) or composed vars (eg. ansible_host,
 # ansible_network_os), add a second inventory source using Ansible's standard
@@ -514,6 +540,15 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         all_groups = payload.get("groups", [])
         self._step(f"{len(all_groups)} device groups returned")
 
+        # A key that matches nothing would otherwise be silent, and a name that differs
+        # only in case or in a stray space looks right in the inventory source
+        unmatched = sorted(set(self.group_name_mapping) - {group["name"] for group in all_groups})
+        if unmatched:
+            self._problem(
+                f"group_name_mapping matched no device group for {', '.join(repr(n) for n in unmatched)}, "
+                f"keys have to match the LibreNMS name exactly, case included."
+            )
+
         # Filter on the defined regex patterns, if any
         if self.group_name_regex_filter:
             self._step(f"filtering device groups on {len(self.group_name_regex_filter)} regexes")
@@ -533,12 +568,14 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             groups = all_groups
 
         membership = defaultdict(list)
-        # Names are converted once per group, rather than once per member, so that a
-        # group whose name is a problem is reported once per run
-        converted_names = {}
+        # Names are resolved once per group, rather than once per member, so that a group
+        # whose name is a problem is reported once per run
+        resolved_names = {}
         # Fetch the members of each fetched group and map them together
         for group in groups:
-            group_name = self._sanitize_group_name(group["name"])
+            # A mapped name is used as written - it was checked when the options were read
+            mapped_name = self.group_name_mapping.get(group["name"])
+            group_name = mapped_name or self._sanitize_group_name(group["name"])
             if not group_name:
                 self.display.warning(
                     f"[librenms] skipping device group {group['name']!r}: nothing is "
@@ -555,11 +592,15 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                     f"Ansible creates for every inventory, its members merge into that one"
                 )
 
-            first_seen = converted_names.setdefault(group_name, group["name"])
-            if first_seen != group["name"]:
+            first_seen, first_was_mapped = resolved_names.setdefault(
+                group_name, (group["name"], bool(mapped_name))
+            )
+            # Mapping two device groups to one name is a deliberate merge; every other way
+            # of arriving at the same name is an accident of the conversion
+            if first_seen != group["name"] and not (first_was_mapped and mapped_name):
                 self.display.warning(
-                    f"[librenms] device groups {first_seen!r} and {group['name']!r} both convert "
-                    f"to the group name {group_name}, their members end up in the same group"
+                    f"[librenms] device groups {first_seen!r} and {group['name']!r} both end up "
+                    f"as the group {group_name}, their members are added to the same group"
                 )
 
             self._step(f"fetching members of device group {group['name']}")
@@ -859,6 +900,42 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         return variables
 
+    def _validate_group_name_mapping(self, configured):
+        """Validates the group_name_mapping option
+
+        The values are used as Ansible group names as given, rather than being converted
+        like the LibreNMS names are, so a value that is not already a valid group name is
+        a mistake in the inventory source rather than something to quietly fix. Checking
+        up front fails the run naming the entry, instead of producing a group under a name
+        the user did not write.
+
+        Args:
+            configured (dict): The raw option value, keyed on LibreNMS device group name
+
+        Returns:
+            mapping (dict): LibreNMS device group name mapped to its Ansible group name
+        """
+        mapping = {}
+
+        for librenms_name, ansible_name in (configured or {}).items():
+            if not isinstance(ansible_name, str) or not ansible_name.strip():
+                raise AnsibleError(
+                    f"group_name_mapping['{librenms_name}'] must be the Ansible group name "
+                    f"to use, got {ansible_name!r}."
+                )
+
+            converted = self._sanitize_group_name(ansible_name)
+            if converted != ansible_name:
+                raise AnsibleError(
+                    f"group_name_mapping['{librenms_name}'] is not a valid Ansible group "
+                    f"name: {ansible_name!r} would have to be written {converted!r}."
+                )
+
+            # A YAML key of 123 parses as an int, while LibreNMS always reports a string
+            mapping[str(librenms_name)] = ansible_name
+
+        return mapping
+
     def _compile_trimming_patterns(self, configured):
         """Validates the hardware_trimming_patterns option and pre-compiles its patterns
 
@@ -1089,6 +1166,9 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         self.exclude_fields = set(self.get_option("exclude_fields") or [])
 
         self.group_name_regex_filter = self.get_option("group_name_regex_filter")
+        self.group_name_mapping = self._validate_group_name_mapping(
+            self.get_option("group_name_mapping")
+        )
         self.host_name_regex_filter = self.get_option("host_name_regex_filter")
         self.re_flags = re.IGNORECASE if self.get_option("regex_ignore_case") else 0
 
