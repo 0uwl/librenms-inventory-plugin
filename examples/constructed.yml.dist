@@ -11,8 +11,8 @@ compose:
   ansible_host: libre_hostname
   ansible_network_os: "{'iosxe': 'ios'}.get(libre_os, libre_os)"
 
-  # Variables used for creating unique groups based on site and room parsing from 
-  # SNMP location. libre_location_* variables come from the parse_location_field setting 
+  # Variables used for creating unique groups based on site and room parsing from
+  # SNMP location. libre_location_* variables come from the parse_location_field setting
   # in the plugin file, so see the explaination for that setting in the plugin documentation.
   _site_group: "'site_' ~ libre_location_site"
   _room_group: "'site_' ~ libre_location_site ~ '_room_' ~ libre_location_room"
@@ -33,7 +33,7 @@ keyed_groups:
 
   # Nested site -> room -> rack groups from a parsed location (parse_location_field in
   # librenms.yml). Each level's group name is prefixed with its *parent's full
-  # name*, so site "NYC" gives site_NYC, and its room "Room2" gives site_NYC_room_Room2. 
+  # name*, so site "NYC" gives site_NYC, and its room "Room2" gives site_NYC_room_Room2.
   # Hosts missing a level (no room, no rack) simply don't get a group at that level
   - key: _room_group
     prefix: ""
