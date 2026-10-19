@@ -1,10 +1,6 @@
 # Copyright (c) 2026 0uwl
 # MIT License (see LICENSE)
 
-from __future__ import absolute_import, division, print_function
-
-__metaclass__ = type
-
 DOCUMENTATION = r"""
     name: librenms
     author:
@@ -467,7 +463,6 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 self._step(f"cache hit for {url}")
             except KeyError:
                 self._step(f"cache miss for {url}")
-                payload = None
         elif user_cache_setting:
             self._step(f"skipping cache read for {url}, a refresh was requested")
         else:
@@ -620,9 +615,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         Returns:
             bool: The converted boolean value. False if value is 0 or None, True if anything else
         """
-        if value is None:
-            return False
-        return str(value) not in ("0", "")
+        return value is not None and str(value) not in ("0", "")
 
     def _device_excluded(self, device):
         """Test if the device should be excluded from the inventory. This can be done by setting
@@ -674,25 +667,15 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         Returns:
             str: The derived hostname for the given device
         """
-        if self.hostname_field:
-            value = device.get(self.hostname_field)
-            if value:
-                return self._ascii_hostname(str(value))
-            generated = str(uuid.uuid4())
-            self._problem(
-                f"device {self._device_label(device)} has no {self.hostname_field}, "
-                f"naming it {generated}"
-            )
-            return generated
-
-        for field in ("sysName", "hostname"):
+        fields = [self.hostname_field] if self.hostname_field else ["sysName", "hostname"]
+        for field in fields:
             value = device.get(field)
             if value:
-                return self._ascii_hostname(value)
+                return self._ascii_hostname(str(value))
 
         generated = str(uuid.uuid4())
         self._problem(
-            f"device {self._device_label(device)} has no sysName or hostname, "
+            f"device {self._device_label(device)} has no {' or '.join(fields)}, "
             f"naming it {generated}"
         )
         return generated
@@ -709,21 +692,18 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         self._step(f"setting host vars for {hostname}")
 
-        # Parse notes if option is enabled
-        if self.parse_notes_field and device.get('notes'):
-            notes_variables = self._parse_notes(hostname, device.get('notes'))
-            if notes_variables is not None:
-                self._step(f"{hostname}: adding {len(notes_variables)} vars from the notes field")
-                for field, value in notes_variables.items():
-                    self.inventory.set_variable(hostname, field, value)
-
-        # Parse the location field if option is enabled. libre_location itself is set
-        # unmodified below by the general field loop - these are additional vars.
-        if self.parse_location_field and device.get('location'):
-            location_variables = self._parse_location(hostname, device.get('location'))
-            if location_variables is not None:
-                self._step(f"{hostname}: adding {len(location_variables)} vars from the location field")
-                for field, value in location_variables.items():
+        # Vars parsed out of notes/location are additional - libre_notes and libre_location
+        # themselves are set unmodified below by the general field loop.
+        for enabled, source, parser in (
+            (self.parse_notes_field, "notes", self._parse_notes),
+            (self.parse_location_field, "location", self._parse_location),
+        ):
+            if not enabled or not device.get(source):
+                continue
+            parsed = parser(hostname, device.get(source))
+            if parsed is not None:
+                self._step(f"{hostname}: adding {len(parsed)} vars from the {source} field")
+                for field, value in parsed.items():
                     self.inventory.set_variable(hostname, field, value)
 
         for field, value in device.items():
@@ -999,7 +979,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
     # --- Grouping -----------------------------------------------------
 
     @staticmethod
-    def _sanitize_group_name(name, replacer="_", force=True, silent=True):
+    def _sanitize_group_name(name):
         """Convert a LibreNMS device group name into a safe Ansible group name
 
         LibreNMS group names are free text, so they regularly contain characters an
@@ -1022,9 +1002,6 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         Args:
             name (str): The device group name as reported by LibreNMS
-            replacer (str): What each rejected character becomes
-            force (bool): Convert regardless of TRANSFORM_INVALID_GROUP_CHARS
-            silent (bool): Suppress Ansible's own "invalid characters" warning
 
         Returns:
             str: The converted name, empty if the name held nothing to convert
@@ -1037,9 +1014,9 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             return name
 
         if re.match(r"\d", name):
-            name = replacer + name
+            name = "_" + name
 
-        return to_safe_group_name(name, replacer=replacer, force=force, silent=silent)
+        return to_safe_group_name(name, replacer="_", force=True, silent=True)
 
     def _add_host_to_device_groups(self, device_id, hostname, membership):
         """Add a host to groups according to its LibreNMS group memberships
@@ -1063,10 +1040,8 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         """
         self._step("populating the inventory")
 
-        # Get devices using any filters the user defined in the plugin file
         devices = self._get_devices()
 
-        # Get group memberships of all devices
         membership = {}
         if self.device_groups_as_ansible_groups:
             membership = self._get_device_group_membership()
@@ -1076,24 +1051,18 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         self._step(f"processing {len(devices)} devices")
         added = 0
 
-        # For every fetched device...
         for device in devices:
-            # Skip the device if it should be excluded according to user configuration
             if self._device_excluded(device):
                 continue
 
-            # Derive the hostname
             hostname = self._derive_hostname(device)
 
-            # Add the host to the dynamic inventory
             self._step(f"adding host {hostname}")
             self.inventory.add_host(hostname)
             added += 1
 
-            # Set the host's variables
             self._set_host_variables(hostname, device)
 
-            # Add the host to all the groups it should be a member of
             if self.device_groups_as_ansible_groups:
                 self._add_host_to_device_groups(device.get("device_id"), hostname, membership)
 
@@ -1132,7 +1101,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
     def parse(self, inventory, loader, path, cache=True):
         # Let the Ansible plugin base class do its initialization of this module first
-        super(InventoryModule, self).parse(inventory, loader, path)
+        super().parse(inventory, loader, path)
 
         self._step(f"reading inventory source {path}")
 
