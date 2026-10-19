@@ -8,4 +8,12 @@ requires-python = ">=3.12"
 dependencies = ["ansible-core"]
 
 [dependency-groups]
-dev = ["ruff==0.16.5", "yamllint==1.38.0"]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.5",
+    "yamllint==1.38.0",
+]
+
+[tool.pytest.ini_options]
+# Integration tests need a live LibreNMS instance; run them explicitly by path.
+testpaths = ["tests/unit"]

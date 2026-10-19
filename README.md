@@ -513,7 +513,7 @@ Check api_token, or the LIBRENMS_TOKEN environment variable.
 ## Testing
 
 ```bash
-uv run python -m unittest discover -s tests/unit
+uv run pytest
 ```
 
 Unit tests mock the LibreNMS HTTP API using fixtures under `tests/unit/fixtures/` and
@@ -537,7 +537,7 @@ LIBRENMS_TOKEN=your-token
 Then run:
 
 ```bash
-uv run python -m unittest discover -s tests/integration -v
+uv run pytest tests/integration -v
 ```
 
 Every assertion is checked against a "ground truth" fetched directly from the same API
