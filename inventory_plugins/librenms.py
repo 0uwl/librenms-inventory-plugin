@@ -316,7 +316,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
     # A location "unit spec" segment: an optional stack number then a literal 'u' then
     # the unit number, eg. "u10", "2u5". Anything else non-empty in that position is a
-    # rack name. Fixed, not user-configurable - see parse_location_field.
+    # rack name. See parse_location_field for details
     _LOCATION_UNIT_RE = re.compile(r"^(?P<stack_nr>\d+)?[uU](?P<unit>\d+)$")
 
     # --- Logging ---------------------------------------------------------
@@ -337,10 +337,10 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         Kept at -v so problems that silently degrade the inventory (a device that
         got a generated hostname, notes that could not be read, a filter that
-        matched nothing) are visible without wading through a -vvvv log.
+        matched nothing) are visible on lower debug levels.
 
         Args:
-            message (str): What went wrong, and what the plugin did about it
+            message (str): What went wrong and what the plugin did about it
         """
         self.display.v(f"[librenms] {message}")
 
@@ -381,23 +381,15 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 validate_certs=self.validate_certs,
             )
         except urllib.error.HTTPError as e:
-            # LibreNMS signals some "nothing found" cases (eg. an empty device group, or
-            # a devices query matching nothing) with a non-2xx HTTP status instead of
-            # 200 + {"status": "error"}, so the body has to be inspected before treating
-            # this as a real failure - a bare status-code check would misreport those as
-            # the endpoint/resource not existing.
             self._step(f"http {e.code} from {url}, checking body for an API message")
             return self._parse_response(url, e, http_status=e.code)
         except urllib.error.URLError as e:
-            # No HTTP response at all - a bad endpoint, DNS, TLS or a timeout. Reported
-            # as an AnsibleError so the user gets the reason instead of a traceback.
-            # AnsibleError appends the cause itself, so it is not repeated here.
             raise AnsibleError(
                 f"Could not reach the LibreNMS API at {url}. "
                 f"Check api_endpoint, validate_certs and timeout"
             ) from e
 
-        self._step(f"http 200 from {url}")
+        self._step(f"200 OK http from {url}")
         return self._parse_response(url, response, http_status=None)
 
     def _parse_response(self, url, response, http_status):
@@ -417,8 +409,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             raw = to_text(response.read(), errors="surrogate_or_strict")
         except UnicodeError as e:
             raise AnsibleError(
-                f"Response from {url} is not valid UTF-8. Check that api_endpoint points "
-                f"at a LibreNMS API and not at some other service"
+                f"Response from {url} is not valid UTF-8. Check api_endpoint correctness"
             ) from e
 
         try:
@@ -446,8 +437,8 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         if payload is None:
             raise AnsibleError(
-                f"Response from {url} is not JSON. Check that api_endpoint points at a "
-                f"LibreNMS API. Body was: {raw}"
+                f"Response from {url} is not JSON. Check api_endpoint correctness. "
+                f"Body was: {raw}"
             )
 
         self._step(f"response from {url} parsed")
@@ -749,8 +740,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         """Sets libre_hardware, plus the derived family and variant vars when trimming is on
 
         Trimming only ever adds variables. libre_hardware stays exactly what LibreNMS
-        reported, because the product ID cannot be reconstructed from the family and the
-        variant - a pattern may consume text that neither of them keeps.
+        reported.
 
         Args:
             hostname (str): The hostname of the device
@@ -759,7 +749,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         """
         self.inventory.set_variable(hostname, "libre_hardware", hardware_value)
 
-        # LibreNMS reports no hardware for devices it could not identify
+        # LibreNMS does not report hardware for devices it can not identify
         if not self.hardware_trimming_patterns or not isinstance(hardware_value, str):
             return
 
@@ -777,8 +767,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         self.inventory.set_variable(hostname, "libre_hardware_family", family)
 
-        # Left unset rather than set to None, so that a device whose product ID is only a
-        # family does not end up in a group of its own when keyed on the variant.
+        # Do not set a variable if no variant data was found
         if variant is not None:
             self.inventory.set_variable(hostname, "libre_hardware_variant", variant)
 
@@ -850,6 +839,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         # valid, form of the format
         variables = {"libre_location_site": site}
 
+        # The room-value is the second segment after the site segment, if there are more than one segment
         room = segments[1].strip() if len(segments) > 1 else ""
         if room:
             variables["libre_location_room"] = room
@@ -875,7 +865,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             # Match the segment against the defined regex pattern for unit specs
             match = self._LOCATION_UNIT_RE.match(segment)
             if match is None:
-                # Not a unit spec - starts a new rack context.
+                # This is not a unit spec, start a new rack context.
                 flush_bare_rack()
                 current_rack = segment
                 current_rack_used = False
