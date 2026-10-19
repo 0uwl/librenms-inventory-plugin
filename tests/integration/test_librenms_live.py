@@ -8,7 +8,7 @@ against a live "ground truth" fetched directly from the same API, so the suite k
 working as the target instance's devices/groups change.
 
 Run with:
-    python3 -m unittest discover -s tests/integration -v
+    uv run pytest tests/integration -v
 """
 
 import json

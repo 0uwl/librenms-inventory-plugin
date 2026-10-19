@@ -16,6 +16,9 @@ inspired by the design of the
 - `ansible-core`
 - A LibreNMS instance with API access enabled and an API token.
 
+Development (linting, tests) uses [uv](https://docs.astral.sh/uv/): `uv sync` installs
+`ansible-core` plus the dev tooling from `uv.lock`.
+
 ## Installation
 
 Clone this repository, then point Ansible at the `inventory_plugins/` directory and
@@ -510,7 +513,7 @@ Check api_token, or the LIBRENMS_TOKEN environment variable.
 ## Testing
 
 ```bash
-python3 -m unittest discover -s tests/unit
+uv run pytest
 ```
 
 Unit tests mock the LibreNMS HTTP API using fixtures under `tests/unit/fixtures/` and
@@ -534,7 +537,7 @@ LIBRENMS_TOKEN=your-token
 Then run:
 
 ```bash
-python3 -m unittest discover -s tests/integration -v
+uv run pytest tests/integration -v
 ```
 
 Every assertion is checked against a "ground truth" fetched directly from the same API
@@ -549,10 +552,10 @@ versions signal with an HTTP 404 rather than an empty list), and a real `ansible
 ## Linting
 
 ```bash
-pip install -r requirements-dev.txt
+uv sync
 
-ruff check .
-yamllint .github/workflows examples/*.yml.dist
+uv run ruff check .
+uv run yamllint .github/workflows examples/*.yml.dist
 ```
 
 Configuration lives in `ruff.toml` and `.yamllint.yml`. Both files carry the reasoning
@@ -575,8 +578,8 @@ in plugin modules.
 Only the unit tests run in CI. `tests/integration` needs a reachable LibreNMS instance
 and skips itself without one, so running it on a GitHub runner would prove nothing.
 
-CI installs `requirements-dev.txt`, which pins the linter versions, so a clean local run
-means a clean CI run.
+CI installs from `uv.lock` (`uv sync --locked`), the same lockfile `uv sync` uses locally,
+so a clean local run means a clean CI run.
 
 ### Requiring CI before a merge
 

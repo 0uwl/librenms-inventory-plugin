@@ -1,0 +1,19 @@
+# Not an installable package: users put inventory_plugins/ on Ansible's path. uv treats
+# this as a virtual project (no build-system), used only to manage the dev environment.
+[project]
+name = "librenms-inventory-plugin"
+version = "1.0.0"
+# ansible-core 2.19+ requires Python 3.12 or newer on the controller.
+requires-python = ">=3.12"
+dependencies = ["ansible-core"]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.5",
+    "yamllint==1.38.0",
+]
+
+[tool.pytest.ini_options]
+# Integration tests need a live LibreNMS instance; run them explicitly by path.
+testpaths = ["tests/unit"]
