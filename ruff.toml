@@ -20,14 +20,9 @@ select = [
 ]
 
 [lint.per-file-ignores]
-# Ansible plugin boilerplate. A plugin module must define DOCUMENTATION/EXAMPLES before
-# its imports (E402), and the Python 2 compatibility preamble - the __future__ imports,
-# __metaclass__ and the explicit super() arguments - is conventional in plugin modules
-# even though it is redundant on the Python versions ansible-core now supports.
-"inventory_plugins/*.py" = ["E402", "UP001", "UP008", "UP010"]
+# A plugin module must define DOCUMENTATION/EXAMPLES before its imports.
+"inventory_plugins/*.py" = ["E402"]
 
-# Test scaffolding. The fake open_url and Display stand-ins have to accept the real
-# signatures whether or not each test looks at every argument, and the temp-file
-# helpers deliberately outlive the block that opens them, with cleanup registered
-# through addCleanup instead of a context manager.
-"tests/*.py" = ["ARG001", "ARG002", "SIM105", "SIM108", "SIM115"]
+# Test scaffolding. The temp-file helpers deliberately outlive the block that opens
+# them, with cleanup registered through addCleanup instead of a context manager.
+"tests/*.py" = ["SIM105", "SIM108", "SIM115"]

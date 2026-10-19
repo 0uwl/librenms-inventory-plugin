@@ -560,9 +560,8 @@ uv run yamllint .github/workflows examples/*.yml.dist
 
 Configuration lives in `ruff.toml` and `.yamllint.yml`. Both files carry the reasoning
 for each ignore, the notable one being that `inventory_plugins/*.py` is exempt from
-`E402` and the pyupgrade rules: an Ansible plugin has to define `DOCUMENTATION` and
-`EXAMPLES` before its imports, and the Python 2 compatibility preamble is conventional
-in plugin modules.
+`E402`: an Ansible plugin has to define `DOCUMENTATION` and `EXAMPLES` before its
+imports.
 
 ## Continuous integration
 
