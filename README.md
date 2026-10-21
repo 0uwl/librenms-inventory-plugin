@@ -131,6 +131,11 @@ Two things to know when writing patterns:
 - **A capture group drops what precedes it.** Without a group the whole match becomes the
   family; with one, only the first group does. That is how `^WS-(C\d+[A-Z]*)` puts older
   Catalyst switches under `C3850` rather than a `WS-C3850` namespace of their own.
+- **Named groups place the variant anywhere.** `(?P<family>...)` and `(?P<variant>...)`
+  set each variable explicitly, for values where the variant comes first. Under `junos`,
+  `(?:(?P<variant>node\d+) )?Juniper (?P<family>SRX\d+)` gives
+  `node0 Juniper SRX340 Internet Router` a family of `SRX340` and a variant of `node0`, and
+  a standalone `Juniper SRX340 Internet Router` the same family with no variant.
 - **Order matters.** Patterns are tried top to bottom, so put the specific ones first.
   Under `nxos`, `^C\d+[A-Z]*` before `^[NC]?\dK-C\d+[A-Z]*` would give `C9K-C93180YC` a
   family of `C9` rather than `C9K-C93180YC`.

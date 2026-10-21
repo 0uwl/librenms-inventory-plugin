@@ -1,6 +1,6 @@
 {
     "status": "ok",
-    "count": 8,
+    "count": 10,
     "devices": [
         {
             "device_id": 21,
@@ -159,6 +159,44 @@
             "community": "public",
             "authpass": "authsecret",
             "cryptopass": "cryptosecret"
+        },
+        {
+            "device_id": 30,
+            "hostname": "edge-fw1.example.com",
+            "sysName": "edge-fw1",
+            "os": "junos",
+            "os_version": "21.4",
+            "hardware": "node0 Juniper SRX340 Internet Router",
+            "type": "network",
+            "status": 1,
+            "location": "DC1",
+            "location_id": 1,
+            "disabled": 0,
+            "ignore": 0,
+            "vendor": "Juniper",
+            "serial": "ABC133",
+            "version": "21.4R3",
+            "uptime": 123456,
+            "ip": "10.0.0.9"
+        },
+        {
+            "device_id": 31,
+            "hostname": "edge-fw2.example.com",
+            "sysName": "edge-fw2",
+            "os": "junos",
+            "os_version": "21.4",
+            "hardware": "Juniper SRX340 Internet Router",
+            "type": "network",
+            "status": 1,
+            "location": "DC1",
+            "location_id": 1,
+            "disabled": 0,
+            "ignore": 0,
+            "vendor": "Juniper",
+            "serial": "ABC134",
+            "version": "21.4R3",
+            "uptime": 123456,
+            "ip": "10.0.0.10"
         }
     ]
 }
