@@ -214,6 +214,12 @@ DOCUMENTATION = r"""
                   pattern of '^WS-(C\d+[A-Z]*)' gives C(WS-C3850-24T) a family of C(C3850),
                   grouping older Catalyst switches under the same names as the 9K
                   generation. Text consumed without being captured is in neither variable.
+                - Named groups C((?P<family>...)) and C((?P<variant>...)) set the family
+                  and variant explicitly, for values where the variant does not follow the
+                  family - a pattern of '(?:(?P<variant>node\d+) )?Juniper (?P<family>SRX\d+)'
+                  gives C(node0 Juniper SRX340 Internet Router) a family of C(SRX340) and a
+                  variant of C(node0). A named variant group that does not take part in the
+                  match leaves the variant unset.
                 - The separator a pattern broke on is stripped from the variant. Devices
                   with nothing left over get no variant at all, rather than an empty one.
                 - Both derived variables are unset for devices LibreNMS reports no hardware
@@ -966,11 +972,21 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             if (match := pattern.match(hardware_value)):
                 # A capture group lets a pattern drop a prefix, eg. the WS- on older
                 # Catalyst switches. Without one, the whole match names the family.
-                family = match.group(1) if pattern.groups else match.group(0)
-                # Whatever the pattern did not consume is the variant. The separator it
-                # broke on is an artefact of where the boundary fell, not part of the
-                # value, so it is stripped.
-                variant = hardware_value[match.end():].lstrip("-/_ ") or None
+                if "family" in pattern.groupindex:
+                    family = match.group("family")
+                else:
+                    family = match.group(1) if pattern.groups else match.group(0)
+
+                # A named variant group is for values where the variant comes before
+                # the family, eg. the cluster node on a Juniper SRX. It is None when
+                # an optional group did not take part in the match.
+                if "variant" in pattern.groupindex:
+                    variant = match.group("variant")
+                else:
+                    # Whatever the pattern did not consume is the variant. The separator
+                    # it broke on is an artefact of where the boundary fell, not part of
+                    # the value, so it is stripped.
+                    variant = hardware_value[match.end():].lstrip("-/_ ") or None
                 return family, variant
 
         self._step(f"no {os_name} hardware pattern matched {hardware_value}, keeping it as is")

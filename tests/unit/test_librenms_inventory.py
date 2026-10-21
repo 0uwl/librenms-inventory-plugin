@@ -443,6 +443,8 @@ class TestHardwareTrimming(LibrenmsInventoryTestCase):
             "core-sw6": "C9200CX-12P-2X2G",
             "core-sw7": None,
             "edge-sw1": "EX4300-48T",
+            "edge-fw1": "node0 Juniper SRX340 Internet Router",
+            "edge-fw2": "Juniper SRX340 Internet Router",
         }
 
         self.assertEqual(self.collect("libre_hardware"), reported)
@@ -475,6 +477,8 @@ class TestHardwareTrimming(LibrenmsInventoryTestCase):
                 "core-sw6": "C9200CX",
                 # junos has no patterns, so the family is the full product ID
                 "edge-sw1": "EX4300-48T",
+                "edge-fw1": "node0 Juniper SRX340 Internet Router",
+                "edge-fw2": "Juniper SRX340 Internet Router",
             },
         )
 
@@ -540,6 +544,22 @@ class TestHardwareTrimming(LibrenmsInventoryTestCase):
         variants = self.variants({"junos": [r"^SRX\d+"]})
 
         self.assertNotIn("edge-sw1", variants)
+
+    # --- named groups -----------------------------------------------------
+
+    SRX_PATTERNS = {"junos": [r"(?:(?P<variant>node\d+) )?Juniper (?P<family>SRX\d+)"]}
+
+    def test_named_groups_take_a_variant_that_precedes_the_family(self):
+        host_vars = self.host_vars(self.SRX_PATTERNS, lowercase_hardware_family=True)["edge-fw1"]
+
+        self.assertEqual(host_vars["libre_hardware_family"], "srx340")
+        self.assertEqual(host_vars["libre_hardware_variant"], "node0")
+
+    def test_variant_is_unset_when_its_named_group_does_not_take_part(self):
+        host_vars = self.host_vars(self.SRX_PATTERNS)["edge-fw2"]
+
+        self.assertEqual(host_vars["libre_hardware_family"], "SRX340")
+        self.assertNotIn("libre_hardware_variant", host_vars)
 
     # --- lowercase_hardware_family ----------------------------------------
 
