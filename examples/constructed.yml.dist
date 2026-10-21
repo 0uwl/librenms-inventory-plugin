@@ -11,6 +11,11 @@ compose:
   ansible_host: libre_hostname
   ansible_network_os: "{'iosxe': 'ios'}.get(libre_os, libre_os)"
 
+  # Vars parsed out of a hostname naming convention, e.g. ams01-core-sw01 gives site
+  # "ams01" and role "core". A hostname that doesn't match leaves the var unset.
+  site: libre_hostname | regex_search('^(?P<site>[a-z]+\d+)-', '\g<site>') | first
+  role: libre_hostname | regex_search('^[a-z]+\d+-(?P<role>[a-z]+)-', '\g<role>') | first
+
   # Variables used for creating unique groups based on site and room parsing from
   # SNMP location. libre_location_* variables come from the parse_location_field setting
   # in the plugin file, so see the explaination for that setting in the plugin documentation.
