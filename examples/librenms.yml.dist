@@ -8,6 +8,13 @@ plugin: librenms
 api_endpoint: https://librenms-host.local/api/v0
 validate_certs: true
 
+# Instead of LIBRENMS_TOKEN, the token can come from Ansible Vault - see the README's
+# "Loading the API token from Ansible Vault" section. It can be generated with
+#   ansible-vault encrypt_string --name api_token 'your-token'
+# api_token: !vault |
+#           $ANSIBLE_VAULT;1.1;AES256
+#           6162636465...
+
 cache: true
 cache_plugin: jsonfile
 cache_connection: /tmp/librenms_inventory_cache
