@@ -36,6 +36,10 @@ exclude_ignored: true
 #   iosxe: *cisco_catalyst
 #   nxos:
 #     - '^[NC]?\dK-C\d+[A-Z]*'
+#   junos:
+#     # Named groups set the family and variant explicitly, for values where the variant
+#     # comes first, eg. the cluster node on an SRX. Standalone SRXs get no variant.
+#     - '^(?:(?P<variant>node\d+) )?Juniper (?P<family>SRX\d+)'
 
 # Lowercase the derived family and variant so they are safe to use directly in group
 # names. Does not affect libre_hardware.
