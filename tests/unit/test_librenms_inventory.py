@@ -1,17 +1,30 @@
 import io
 import json
 import os
+import re
+import sys
 import tempfile
 import unittest
 import urllib.error
 import uuid
 from unittest import mock
 
+import yaml
 from ansible.errors import AnsibleError
 from ansible.inventory.data import InventoryData
 from ansible.parsing.dataloader import DataLoader
 from ansible.plugins.loader import inventory_loader
 from ansible.utils.display import Display
+
+# Private, so guarded: a core that renames either of these should skip the one test that
+# needs them rather than fail to import the whole module. In a real run InventoryManager
+# wraps InventoryData in this and tags every value set through it, which is the only way
+# to reproduce the value types a snapshot has to be able to serialize.
+try:
+    from ansible._internal._datatag._tags import Origin
+    from ansible.inventory.manager import _InventoryDataWrapper
+except ImportError:  # pragma: no cover
+    Origin = _InventoryDataWrapper = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "fixtures")
@@ -32,6 +45,23 @@ def get_plugin_instance():
 def load_fixture(name):
     with open(os.path.join(FIXTURES, name)) as f:
         return json.load(f)
+
+
+def read_generated(path):
+    """Parse a generated snapshot with Ansible's own yaml inventory plugin
+
+    Going through the real plugin is the point: it is what a user pointing `ansible -i`
+    at the file gets, so it proves the file is a usable inventory rather than merely
+    well-formed YAML.
+
+    Returns:
+        InventoryData: The inventory the file reads back as, reconciled
+    """
+    plugin = inventory_loader.get("yaml")
+    inventory = InventoryData()
+    plugin.parse(inventory, DataLoader(), path, cache=False)
+    inventory.reconcile_inventory()
+    return inventory
 
 
 # The LibreNMS group "Network Core" has a space in its name, so it reaches the API
@@ -106,7 +136,7 @@ def make_open_url(routes=None, call_log=None, request_log=None):
     return _open_url
 
 
-def write_config(**overrides):
+def write_config(config_dir=None, **overrides):
     config = {
         "plugin": "librenms",
         "api_endpoint": "https://fake-librenms.example.com/api/v0",
@@ -121,7 +151,7 @@ def write_config(**overrides):
     content = "\n".join(lines) + "\n"
 
     handle = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yml", delete=False, dir=tempfile.gettempdir()
+        mode="w", suffix=".yml", delete=False, dir=config_dir or tempfile.gettempdir()
     )
     handle.write(content)
     handle.close()
@@ -140,17 +170,36 @@ class LibrenmsInventoryTestCase(unittest.TestCase):
             except OSError:
                 pass
 
-    def build_plugin(self, routes=None, call_log=None, request_log=None, **config_overrides):
-        config_path = write_config(**config_overrides)
+    def build_plugin(
+        self,
+        routes=None,
+        call_log=None,
+        request_log=None,
+        config_dir=None,
+        wrap_inventory=False,
+        **config_overrides,
+    ):
+        config_path = write_config(config_dir=config_dir, **config_overrides)
         self._configs.append(config_path)
+        # Kept so a test can assert on, or point an option at, the inventory source file
+        self.last_config = config_path
 
         plugin = get_plugin_instance()
         modname = type(plugin).__module__
         inventory = InventoryData()
         loader = DataLoader()
 
+        # A real run gets InventoryManager's wrapper rather than a bare InventoryData, and
+        # the wrapper tags every value the plugin sets. Tests that care what the host vars
+        # actually are at write time ask for it.
+        target = inventory
+        if wrap_inventory:
+            target = _InventoryDataWrapper(
+                inventory, target_plugin=plugin, origin=Origin(description="<test>")
+            )
+
         with mock.patch(modname + ".open_url", make_open_url(routes, call_log, request_log)):
-            plugin.parse(inventory, loader, config_path, cache=True)
+            plugin.parse(target, loader, config_path, cache=True)
             if plugin.get_option("cache"):
                 # Normally done by InventoryManager after parse() returns; replicate it
                 # here since the test calls parse() directly.
@@ -824,6 +873,406 @@ class TestCaching(LibrenmsInventoryTestCase):
             self.assertTrue(forced_call_log, "cache_force_update should bypass the cache")
 
 
+class TestSnapshotFile(LibrenmsInventoryTestCase):
+    """write_to_file writes the populated inventory out as a static YAML inventory file.
+    It sits next to the caching tests deliberately: it is the other feature that leaves
+    something on disk, and the one it keeps being mistaken for."""
+
+    def snapshot(self, work_dir, routes=None, call_log=None, name="snap.yml", **overrides):
+        """Run the plugin with write_to_file on, from an inventory source inside work_dir
+
+        Args:
+            work_dir (str): Directory to put the inventory source, and the snapshot, in
+            name (str): inventory_file, relative to work_dir unless overridden
+
+        Returns:
+            (plugin, inventory, path): The plugin, the inventory and the snapshot's path
+        """
+        overrides.setdefault("write_to_file", True)
+        overrides.setdefault("inventory_file", name)
+        plugin, inventory = self.build_plugin(
+            routes=routes, call_log=call_log, config_dir=work_dir, **overrides
+        )
+        return plugin, inventory, os.path.join(work_dir, name)
+
+    @staticmethod
+    def keys_in_file_order(text, section):
+        """The keys the file lists directly under all.<section>, in the order it lists them
+
+        Asserted on the text rather than the parsed document because parsing is exactly
+        what throws the ordering away, and the ordering is the point of a file meant to be
+        committed and diffed.
+
+        Args:
+            text (str): The snapshot file's contents
+            section (str): "children" or "hosts"
+
+        Returns:
+            list: The keys, in file order
+        """
+        body = text.split(f"\n  {section}:\n", 1)[1]
+        # Stops at the next key of `all`, which is indented two spaces
+        body = re.split(r"^  \S", body, maxsplit=1, flags=re.MULTILINE)[0]
+        return re.findall(r"^    (\S+):", body, re.MULTILINE)
+
+    @staticmethod
+    def host_var_keys_in_file_order(text, hostname):
+        """The host var keys the file lists for one host, in the order it lists them"""
+        body = text.split(f"\n    {hostname}:\n", 1)[1]
+        # Stops at the next host, which is indented four spaces
+        body = re.split(r"^    \S", body, maxsplit=1, flags=re.MULTILINE)[0]
+        return re.findall(r"^      (\S+):", body, re.MULTILINE)
+
+    # --- what gets written ---
+
+    def test_no_file_is_written_by_default(self):
+        with tempfile.TemporaryDirectory() as work:
+            self.build_plugin(config_dir=work)
+
+            self.assertEqual(
+                os.listdir(work),
+                [os.path.basename(self.last_config)],
+                "write_to_file defaults to off, so nothing but the source should be there",
+            )
+
+    def test_the_document_is_a_single_top_level_all_group(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work)
+            document = yaml.safe_load(open(path))
+
+            self.assertEqual(list(document), ["all"])
+            self.assertEqual(sorted(document["all"]), ["children", "hosts"])
+            # Ansible's yaml inventory plugin refuses any file carrying a plugin key
+            self.assertNotIn("plugin", document)
+
+    def test_hosts_carry_their_host_vars_inline(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work)
+            hosts = yaml.safe_load(open(path))["all"]["hosts"]
+
+            self.assertEqual(sorted(hosts), ["core-sw1", "core-sw2"])
+            self.assertEqual(hosts["core-sw1"]["libre_hardware"], "C9300")
+            self.assertEqual(hosts["core-sw1"]["libre_hostname"], "core-sw1.example.com")
+
+    def test_vars_parsed_out_of_the_notes_field_are_written_too(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_notes.json"
+
+        with tempfile.TemporaryDirectory() as work:
+            _, inventory, path = self.snapshot(work, routes=routes, parse_notes_field=True)
+            hosts = yaml.safe_load(open(path))["all"]["hosts"]
+
+            hostname = next(iter(inventory.hosts))
+            expected = {
+                key: value
+                for key, value in inventory.get_host(hostname).vars.items()
+                if key not in ("inventory_file", "inventory_dir")
+            }
+            self.assertEqual(hosts[hostname], expected)
+
+    def test_group_membership_is_written_as_children_of_all(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work)
+            children = yaml.safe_load(open(path))["all"]["children"]
+
+            # Edge's only device is disabled, so exclude_disabled leaves it with no members
+            self.assertEqual(sorted(children), ["Core", "Network_Core"])
+            self.assertEqual(sorted(children["Core"]["hosts"]), ["core-sw1", "core-sw2"])
+            # Membership only - the vars live under all.hosts, once
+            self.assertIsNone(children["Core"]["hosts"]["core-sw1"])
+
+    def test_a_host_in_several_groups_is_listed_under_each_of_them(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work)
+            document = yaml.safe_load(open(path))
+
+            self.assertIn("core-sw1", document["all"]["children"]["Core"]["hosts"])
+            self.assertIn("core-sw1", document["all"]["children"]["Network_Core"]["hosts"])
+            # and its vars are not repeated per group
+            self.assertIn("libre_hardware", document["all"]["hosts"]["core-sw1"])
+
+    def test_a_host_in_no_group_is_listed_under_all_only(self):
+        with tempfile.TemporaryDirectory() as work:
+            # old-switch is ignored in LibreNMS and in none of the device groups
+            _, _, path = self.snapshot(work, exclude_ignored=False)
+            document = yaml.safe_load(open(path))
+
+            self.assertIn("old-switch", document["all"]["hosts"])
+            for group, entry in document["all"]["children"].items():
+                self.assertNotIn("old-switch", entry.get("hosts", {}), f"should not be in {group}")
+
+    def test_implicit_groups_are_not_written_as_groups_of_their_own(self):
+        with tempfile.TemporaryDirectory() as work:
+            plugin, _, path = self.snapshot(work)
+            children = yaml.safe_load(open(path))["all"]["children"]
+
+            for implicit in sys.modules[type(plugin).__module__].IMPLICIT_GROUPS:
+                self.assertNotIn(implicit, children)
+
+    def test_children_is_omitted_when_grouping_is_off(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work, device_groups_as_ansible_groups=False)
+            document = yaml.safe_load(open(path))
+
+            self.assertEqual(list(document["all"]), ["hosts"])
+
+    def test_the_vars_ansible_adds_itself_are_not_written(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work)
+            hosts = yaml.safe_load(open(path))["all"]["hosts"]
+
+            for host_vars in hosts.values():
+                for implicit in ("inventory_file", "inventory_dir", "inventory_hostname",
+                                 "inventory_hostname_short", "group_names"):
+                    self.assertNotIn(implicit, host_vars)
+
+    def test_only_the_hosts_this_plugin_added_are_written(self):
+        # InventoryData is shared by every source in a run, so a host another source
+        # contributed must not end up in this plugin's snapshot
+        with tempfile.TemporaryDirectory() as work:
+            config_path = write_config(
+                config_dir=work, write_to_file=True, inventory_file="snap.yml"
+            )
+            self._configs.append(config_path)
+
+            plugin = get_plugin_instance()
+            modname = type(plugin).__module__
+            inventory = InventoryData()
+            inventory.add_host("a-host-from-another-source")
+
+            with mock.patch(modname + ".open_url", make_open_url()):
+                plugin.parse(inventory, DataLoader(), config_path, cache=False)
+
+            hosts = yaml.safe_load(open(os.path.join(work, "snap.yml")))["all"]["hosts"]
+            self.assertEqual(sorted(hosts), ["core-sw1", "core-sw2"])
+
+    # --- the file is a usable inventory ---
+
+    def test_the_file_round_trips_to_an_equivalent_inventory(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, live, path = self.snapshot(work, exclude_ignored=False)
+            live.reconcile_inventory()
+            reread = read_generated(path)
+
+            def groups_of(inventory):
+                return {name: sorted(hosts) for name, hosts in inventory.get_groups_dict().items()}
+
+            def vars_of(inventory):
+                return {
+                    name: {
+                        key: value
+                        for key, value in host.vars.items()
+                        if key not in ("inventory_file", "inventory_dir")
+                    }
+                    for name, host in inventory.hosts.items()
+                }
+
+            self.assertEqual(groups_of(live), groups_of(reread))
+            self.assertEqual(vars_of(live), vars_of(reread))
+
+    @unittest.skipIf(_InventoryDataWrapper is None, "InventoryManager's wrapper moved")
+    def test_the_values_a_real_run_produces_can_be_serialized(self):
+        # The one test that would catch yaml.safe_dump being used here. A real run gets
+        # InventoryManager's wrapper, which tags every value, and safe_dump raises
+        # RepresenterError on a tagged str - while the bare InventoryData every other test
+        # uses holds plain values that safe_dump handles. Without this, swapping the dumper
+        # back passes the whole suite and breaks every user on their first run.
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work, wrap_inventory=True)
+
+            hosts = yaml.safe_load(open(path))["all"]["hosts"]
+            self.assertEqual(hosts["core-sw1"]["libre_hardware"], "C9300")
+            self.assertEqual(sorted(read_generated(path).hosts), ["core-sw1", "core-sw2"])
+
+    # --- the file is worth committing ---
+
+    def test_the_header_names_the_source_and_warns_against_editing(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work)
+            header = "".join(open(path).readlines()[:2])
+
+            self.assertIn("librenms", header)
+            # The basename only, so two checkouts at different paths still match
+            self.assertIn(os.path.basename(self.last_config), header)
+            self.assertNotIn(work, header)
+            self.assertIn("regenerate", header)
+
+    def test_two_runs_over_unchanged_data_are_byte_identical(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work)
+            first = open(path, "rb").read()
+
+            # Same source file, so the same default name and the same header
+            plugin = get_plugin_instance()
+            modname = type(plugin).__module__
+            with mock.patch(modname + ".open_url", make_open_url()):
+                plugin.parse(InventoryData(), DataLoader(), self.last_config, cache=False)
+
+            self.assertEqual(open(path, "rb").read(), first, "no timestamp should be written")
+
+    def test_hosts_groups_and_var_keys_are_sorted(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work, exclude_ignored=False)
+            text = open(path).read()
+
+            groups = self.keys_in_file_order(text, "children")
+            hosts = self.keys_in_file_order(text, "hosts")
+            host_vars = self.host_var_keys_in_file_order(text, "core-sw1")
+
+            self.assertEqual(groups, sorted(groups))
+            self.assertEqual(hosts, sorted(hosts))
+            self.assertEqual(host_vars, sorted(host_vars))
+
+    def test_an_existing_mode_is_preserved(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work)
+            os.chmod(path, 0o600)
+
+            plugin = get_plugin_instance()
+            modname = type(plugin).__module__
+            with mock.patch(modname + ".open_url", make_open_url()):
+                plugin.parse(InventoryData(), DataLoader(), self.last_config, cache=False)
+
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    # --- where the file goes ---
+
+    def test_the_default_path_is_the_source_name_with_generated_yml(self):
+        with tempfile.TemporaryDirectory() as work:
+            self.build_plugin(config_dir=work, write_to_file=True)
+
+            stem = os.path.splitext(os.path.basename(self.last_config))[0]
+            expected = os.path.join(work, stem + ".generated.yml")
+            self.assertTrue(os.path.exists(expected), os.listdir(work))
+
+    def test_a_relative_path_is_anchored_to_the_inventory_source_directory(self):
+        with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as elsewhere:
+            self.addCleanup(os.chdir, os.getcwd())
+            os.chdir(elsewhere)
+
+            _, _, path = self.snapshot(work, name="snap.yml")
+
+            self.assertTrue(os.path.exists(path), "should land beside the inventory source")
+            self.assertEqual(os.listdir(elsewhere), [], "and not in the working directory")
+
+    def test_a_missing_directory_in_the_path_is_created(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work, name=os.path.join("generated", "snap.yml"))
+
+            self.assertTrue(os.path.exists(path))
+
+    def test_a_tilde_is_expanded(self):
+        with tempfile.TemporaryDirectory() as work:
+            with mock.patch.dict(os.environ, {"HOME": work}):
+                self.snapshot(work, name="~/snap.yml")
+
+            self.assertTrue(os.path.exists(os.path.join(work, "snap.yml")))
+
+    def test_environment_variables_are_expanded(self):
+        with tempfile.TemporaryDirectory() as work:
+            with mock.patch.dict(os.environ, {"LIBRENMS_SNAPSHOT_DIR": work}):
+                self.snapshot(work, name="$LIBRENMS_SNAPSHOT_DIR/snap.yml")
+
+            self.assertTrue(os.path.exists(os.path.join(work, "snap.yml")))
+
+    # --- what it refuses to do ---
+
+    def test_it_refuses_to_write_over_the_inventory_source_file(self):
+        # Written by hand rather than through write_config, since inventory_file has to
+        # name the source's own filename and write_config picks a random one
+        with tempfile.TemporaryDirectory() as work:
+            config_path = os.path.join(work, "librenms.yml")
+            with open(config_path, "w") as handle:
+                handle.write(
+                    "plugin: librenms\n"
+                    "api_endpoint: https://fake-librenms.example.com/api/v0\n"
+                    "api_token: test-token\n"
+                    "cache: false\n"
+                    "write_to_file: true\n"
+                    "inventory_file: librenms.yml\n"
+                )
+            before = open(config_path, "rb").read()
+
+            plugin = get_plugin_instance()
+            modname = type(plugin).__module__
+            with mock.patch(modname + ".open_url", make_open_url()), \
+                    self.assertRaisesRegex(AnsibleError, "inventory source file"):
+                plugin.parse(InventoryData(), DataLoader(), config_path, cache=False)
+
+            self.assertEqual(open(config_path, "rb").read(), before)
+
+    def test_it_refuses_to_write_over_an_inventory_plugin_configuration(self):
+        with tempfile.TemporaryDirectory() as work:
+            other = os.path.join(work, "constructed.yml")
+            with open(other, "w") as handle:
+                handle.write("plugin: constructed\nstrict: false\n")
+
+            with self.assertRaisesRegex(AnsibleError, "plugin key"):
+                self.snapshot(work, name="constructed.yml")
+
+            self.assertEqual(open(other).read(), "plugin: constructed\nstrict: false\n")
+
+    def test_it_refuses_a_directory_as_the_target(self):
+        with tempfile.TemporaryDirectory() as work:
+            os.mkdir(os.path.join(work, "inventory"))
+
+            with self.assertRaisesRegex(AnsibleError, "existing directory"):
+                self.snapshot(work, name="inventory")
+
+    def test_the_path_is_vetted_before_any_api_call(self):
+        with tempfile.TemporaryDirectory() as work:
+            os.mkdir(os.path.join(work, "inventory"))
+            call_log = []
+
+            with self.assertRaises(AnsibleError):
+                self.snapshot(work, call_log=call_log, name="inventory")
+
+            self.assertEqual(call_log, [], "a path that cannot work should cost no requests")
+
+    def test_a_path_that_cannot_be_written_names_the_option(self):
+        with tempfile.TemporaryDirectory() as work:
+            # A file where a directory would have to be: makedirs fails with an OSError,
+            # which has to surface as an AnsibleError naming the option, not a traceback
+            with open(os.path.join(work, "blocker"), "w") as handle:
+                handle.write("not a directory\n")
+
+            with self.assertRaisesRegex(AnsibleError, "inventory_file"):
+                self.snapshot(work, name=os.path.join("blocker", "snap.yml"))
+
+    def test_a_value_the_snapshot_would_template_is_reported(self):
+        # A LibreNMS value is untrusted on a live run and never templated; the same value
+        # read back out of a static inventory file is trusted and would be evaluated. The
+        # file cannot opt out of that, so the host carrying one gets named instead.
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_template.json"
+
+        problems = []
+        with tempfile.TemporaryDirectory() as work, mock.patch.object(Display, "v", problems.append):
+            self.snapshot(work, routes=routes)
+
+        self.assertTrue(
+            any("Jinja2 delimiters" in problem and "tpl-sw1" in problem for problem in problems),
+            problems,
+        )
+
+    # --- a run that found nothing must not destroy a good snapshot ---
+
+    def test_an_empty_inventory_leaves_an_existing_file_alone(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work)
+            before = open(path, "rb").read()
+
+            self.snapshot(work, host_name_regex_filter=["^nothing-matches-this$"])
+
+            self.assertEqual(open(path, "rb").read(), before)
+
+    def test_an_empty_inventory_writes_no_file_at_all(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, _, path = self.snapshot(work, host_name_regex_filter=["^nothing-matches-this$"])
+
+            self.assertFalse(os.path.exists(path))
+
+
 class TestApiTokenTemplating(LibrenmsInventoryTestCase):
     # Exercises _resolve_api_token() directly rather than through a full parse(), since
     # simulating real --extra-vars CLI plumbing (ansible.context.CLIARGS) is fragile and
@@ -1007,6 +1456,48 @@ class TestDisplayMessages(LibrenmsInventoryTestCase):
             "done",
         ):
             self.assertIn(expected, joined)
+
+    def test_the_resolved_snapshot_path_is_reported_at_vvvv(self):
+        with tempfile.TemporaryDirectory() as work:
+            steps, _, _ = self.capture_display(
+                config_dir=work, write_to_file=True, inventory_file="snap.yml"
+            )
+            joined = "\n".join(steps)
+
+            # The absolute path, so a relative inventory_file is not left ambiguous
+            self.assertIn(f"the snapshot will be written to {os.path.join(work, 'snap.yml')}", joined)
+            self.assertIn("snapshot written to", joined)
+
+    def test_write_to_file_being_off_is_reported_at_vvvv(self):
+        steps, _, _ = self.capture_display()
+
+        self.assertIn("write_to_file is off, no snapshot file will be written", "\n".join(steps))
+
+    def test_not_writing_an_empty_snapshot_is_reported_at_v(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, problems, _ = self.capture_display(
+                config_dir=work,
+                write_to_file=True,
+                inventory_file="snap.yml",
+                host_name_regex_filter=["^nothing-matches-this$"],
+            )
+
+            self.assertTrue(
+                any("no hosts were added, leaving" in problem for problem in problems),
+                problems,
+            )
+
+    def test_an_extension_ansible_cannot_read_back_is_reported_at_v(self):
+        with tempfile.TemporaryDirectory() as work:
+            _, problems, _ = self.capture_display(
+                config_dir=work, write_to_file=True, inventory_file="snap.txt"
+            )
+
+            self.assertTrue(
+                any("will not read it back" in problem for problem in problems), problems
+            )
+            # reported, but still written
+            self.assertTrue(os.path.exists(os.path.join(work, "snap.txt")))
 
     def test_step_messages_are_prefixed_so_they_can_be_grepped(self):
         steps, _, _ = self.capture_display()

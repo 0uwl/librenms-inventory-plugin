@@ -1,0 +1,26 @@
+{
+  "status": "ok",
+  "count": 1,
+  "devices": [
+    {
+      "device_id": 1,
+      "hostname": "tpl-sw1.example.com",
+      "sysName": "tpl-sw1",
+      "os": "ios",
+      "os_version": "15.2",
+      "hardware": "C9300",
+      "type": "network",
+      "status": 1,
+      "location": "DC1",
+      "location_id": 1,
+      "disabled": 0,
+      "ignore": 0,
+      "notes": "owner {{ lookup('env', 'USER') }}",
+      "vendor": "Cisco",
+      "serial": "ABC123",
+      "version": "15.2(7)",
+      "uptime": 123456,
+      "ip": "10.0.0.1"
+    }
+  ]
+}

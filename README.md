@@ -259,6 +259,10 @@ Note this only controls what the plugin exposes as host vars, it can't retroacti
 secure a value that already came back from an HTTP API as plaintext JSON. Vault (below)
 encrypts values *you* control at rest in files, it has no bearing on live API responses.
 
+`exclude_fields` is also what keeps these fields out of a file written by `write_to_file`,
+which puts every host var it is given on disk in plaintext - see
+[Writing the inventory to a file](#writing-the-inventory-to-a-file).
+
 ## Loading the API token from Ansible Vault
 
 `api_token` supports two ways to keep it out of plaintext:
@@ -459,6 +463,131 @@ and run all sources together:
 ansible-inventory -v --list -i librenms.yml -i constructed.yml
 ```
 
+## Writing the inventory to a file
+
+Set `write_to_file` and the plugin writes the inventory it just built out as a static
+YAML inventory file, as well as handing it to the run in progress:
+
+```yaml
+# librenms.yml
+plugin: librenms
+api_endpoint: https://librenms.example.com/api/v0
+
+write_to_file: true
+inventory_file: ./inventory/librenms.yml
+```
+
+The result is Ansible's own inventory format, hosts under `all` with their host vars
+inline and each group listed as a child of `all`:
+
+```yaml
+# inventory/librenms.yml
+---
+all:
+  children:
+    Core:
+      hosts:
+        core-sw1: null
+        core-sw2: null
+  hosts:
+    core-sw1:
+      libre_hardware: C9300
+      libre_os: ios
+      libre_sysName: core-sw1
+    core-sw2:
+      libre_hardware: C9300
+      libre_os: iosxe
+      libre_sysName: core-sw2
+```
+
+Group membership is written separately from the host vars, so a host in two device
+groups is listed under both without its vars being repeated, and a host in no group at
+all is listed under `all` only - where Ansible puts it back into `ungrouped` on the way
+in, exactly as this plugin does.
+
+### Using it as a cache
+
+Because the file is a real inventory, Ansible reads it with its own built-in `yaml`
+plugin. Nothing from this repository has to be installed on the machine that consumes
+it, and no API token has to be available there:
+
+```bash
+# once, against the API - writes inventory/librenms.yml
+ansible-inventory --list -i librenms.yml > /dev/null
+
+# from then on: no LibreNMS, no token, no network
+ansible-playbook -i inventory/librenms.yml site.yml
+```
+
+That is the useful sense in which the file is a cache: a snapshot you can run against
+offline, commit as a record of what the fleet looked like, or hand to a host that cannot
+reach LibreNMS at all.
+
+It is **not** the plugin's cache, and nothing ever reads it back. Caching within a run
+is what `cache`, `cache_plugin` and `cache_timeout` do, and the two are not
+interchangeable:
+
+| | What it stores | When it goes stale |
+| --- | --- | --- |
+| `cache` (see [Configuration](#configuration)) | The raw LibreNMS API responses | After `cache_timeout`. A changed option (`group_name_mapping`, `exclude_fields`, `hardware_trimming_patterns`) is honoured on the next run, because the inventory is re-derived from the cached responses |
+| `write_to_file` | The already-rendered inventory | Whenever LibreNMS changes. A changed option has no effect on it until a run with API access rewrites it |
+
+So: use the cache to make runs fast, and the file to make runs possible without the API.
+
+### What is and is not in the file
+
+Everything in [Host variables](#host-variables) is there, including the vars derived from
+the Notes and location fields, and the groups from [Grouping](#grouping). Ansible's magic
+vars (`inventory_hostname`, `group_names`, `inventory_file`) are not - Ansible recomputes
+those per source, and writing them would pin each host to the run that wrote the file.
+
+One difference the file cannot carry over: a value LibreNMS reported is *untrusted* on a
+live run, so Ansible never treats it as a template, while the same value read back out of
+a static inventory file is trusted and would be. A device whose Notes field contains
+`{{ ... }}` is therefore left literal on a live run and evaluated when read from the
+snapshot. That is Ansible's rule for any static inventory file, not something this file can
+opt out of, so the plugin names any host carrying one at `-v` as it writes.
+
+Only what this plugin added is written. A `constructed` source chained after it is parsed
+*later*, so its groups and composed vars are not in the file - chain it over the file the
+same way you chain it over the plugin, which works unchanged:
+
+```bash
+ansible-inventory --list -i inventory/librenms.yml -i constructed.yml
+```
+
+### Paths
+
+`inventory_file` is a full path including the filename. A relative one resolves against
+the directory holding the inventory source file rather than the working directory, so the
+output lands in the same place whether you run `ansible` from the project root or from
+somewhere below it. `~` and environment variables are expanded, missing directories are
+created, and `-vvvv` reports the absolute path it settled on.
+
+Leave `inventory_file` out and the name is derived from the inventory source: `librenms.yml`
+writes `librenms.generated.yml` beside itself. It refuses to write over the inventory
+source file, over another source the run has already parsed, over a directory, or over any
+file with a `plugin:` key - overwriting one of those would destroy the configuration that
+produced the inventory. The write itself goes through a temporary file in the same
+directory and is moved into place, so an interrupted run cannot leave half an inventory
+behind.
+
+### Committing it
+
+Hosts, groups and var keys are sorted and no timestamp is written, so a run that found
+nothing new rewrites exactly the same bytes and a diff means the fleet really changed.
+
+One caveat before committing one: the file holds every host var the run set. With
+`exclude_fields` emptied (see [Sensitive fields](#sensitive-fields)) that includes the
+SNMP community string and SNMPv3 passphrases, in plaintext, in your repository.
+
+A note on hostnames: a host key in a YAML inventory is a *pattern*, so a name containing
+`:` (an IPv6 address, or something that looks like `host:port`) or `[`...`]` does not read
+back as the same host - Ansible expands it. The plugin reports any such host at `-v` when
+it writes the file. Quoting does not help, the expansion happens after the YAML is parsed.
+Use `hostname_field` to pick a field that gives plain names if LibreNMS reports addresses
+for your devices.
+
 ## Troubleshooting
 
 The plugin reports what it is doing at two verbosity levels, and every message it emits
@@ -484,6 +613,10 @@ it, so a run that "worked" but produced the wrong thing explains itself:
 | `api_token did not resolve to a value` | The vault/extra var referenced by `api_token` is not defined |
 | `<host>: notes field is YAML but not a mapping of vars` | The Notes field parses, but not into `key: value` pairs |
 | `<host>: location field has no site` | `location` doesn't start with a site before the first `;` - see [Parsing the location field](#parsing-the-location-field-into-rackunit-positions) |
+| `no hosts were added, leaving <path> as it is` | Every device was filtered out or none was returned, so an existing snapshot file is deliberately left alone - see [Writing the inventory to a file](#writing-the-inventory-to-a-file) |
+| `inventory_file <path> does not end in .yml, .yaml or .json` | The file is written, but `ansible -i` will not read that name back |
+| `host <name> contains one of [ ] :` | The snapshot is written, but a YAML inventory reads that name as a port or a host range rather than as this host |
+| `<host>: <field> contains Jinja2 delimiters` | A LibreNMS value holds `{{ ... }}`, which a live run leaves literal but a snapshot evaluates - see [Writing the inventory to a file](#writing-the-inventory-to-a-file) |
 
 At `-vvvv` every step is reported as it happens - options being applied, each API request
 and whether it came from the cache, each device that was skipped and why, the hardware
@@ -497,6 +630,10 @@ Check api_endpoint, validate_certs and timeout: <urlopen error [Errno -2] Name o
 
 LibreNMS rejected the API token (HTTP 401): Unauthenticated.
 Check api_token, or the LIBRENMS_TOKEN environment variable.
+
+inventory_file resolved to /etc/ansible/librenms.yml, which is the inventory source file
+itself. Writing the inventory there would destroy the configuration that produced it.
+Point it at a different file.
 ```
 
 ## Migrating from mschedrin/librenms-ansible-inventory-plugin
@@ -508,7 +645,9 @@ Check api_token, or the LIBRENMS_TOKEN environment variable.
   dropped in favor of the plugin (as the old README itself recommended).
 - `host_name_regex_filter`, `group_name_regex_filter`, `regex_ignore_case`,
   `exclude_disabled`, and `cache_force_update` keep the same names and behavior.
-- New: `exclude_ignored`, `hostname_field`, `device_status_filter`, `query_filters`.
+- New: `exclude_ignored`, `hostname_field`, `device_status_filter`, `query_filters`,
+  `write_to_file`/`inventory_file` (see
+  [Writing the inventory to a file](#writing-the-inventory-to-a-file)).
 - Device group names containing whitespace now become valid Ansible group names
   (`Network Core` -> `Network_Core`), see [Group names](#group-names).
 - Property-based grouping and vars like `ansible_host`/`ansible_network_os` are no
