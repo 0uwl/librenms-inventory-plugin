@@ -541,12 +541,14 @@ the Notes and location fields, and the groups from [Grouping](#grouping). Ansibl
 vars (`inventory_hostname`, `group_names`, `inventory_file`) are not - Ansible recomputes
 those per source, and writing them would pin each host to the run that wrote the file.
 
-One difference the file cannot carry over: a value LibreNMS reported is *untrusted* on a
-live run, so Ansible never treats it as a template, while the same value read back out of
-a static inventory file is trusted and would be. A device whose Notes field contains
-`{{ ... }}` is therefore left literal on a live run and evaluated when read from the
-snapshot. That is Ansible's rule for any static inventory file, not something this file can
-opt out of, so the plugin names any host carrying one at `-v` as it writes.
+A value LibreNMS reported is *untrusted* on a live run, so Ansible never treats it as a
+template, while a value read back out of a static inventory file is trusted and would be.
+So that a device whose Notes field contains `{{ ... }}` stays literal in the snapshot too,
+any host var value holding a brace - the start of every Jinja2 delimiter - is written with
+YAML's `!unsafe` tag, which Ansible reads back as untrusted, nested mapping keys included.
+Values without a brace are written plain: they cannot be templates, and Ansible resolves an
+`!unsafe` scalar's type afresh, which would turn a version string like `'15.2'` into a
+number.
 
 Only what this plugin added is written. A `constructed` source chained after it is parsed
 *later*, so its groups and composed vars are not in the file - chain it over the file the
@@ -562,15 +564,24 @@ ansible-inventory --list -i inventory/librenms.yml -i constructed.yml
 the directory holding the inventory source file rather than the working directory, so the
 output lands in the same place whether you run `ansible` from the project root or from
 somewhere below it. `~` and environment variables are expanded, missing directories are
-created, and `-vvvv` reports the absolute path it settled on.
+created, and `-vvvv` reports the absolute path it settled on. An environment variable that
+is not set fails the run naming it, rather than creating a directory called `$VAR`. A
+symlink is followed: the file it points to is updated and the link is left in place.
 
 Leave `inventory_file` out and the name is derived from the inventory source: `librenms.yml`
-writes `librenms.generated.yml` beside itself. It refuses to write over the inventory
-source file, over another source the run has already parsed, over a directory, or over any
-file with a `plugin:` key - overwriting one of those would destroy the configuration that
-produced the inventory. The write itself goes through a temporary file in the same
-directory and is moved into place, so an interrupted run cannot leave half an inventory
-behind.
+writes `.librenms.generated.yml` beside itself. It is hidden on purpose: when `-i` names a
+directory, Ansible parses every file in it but skips hidden ones, so a visible snapshot
+would be read as a second inventory source on the next run. Point `-i` at the file itself
+to use it (`-i inventory/.librenms.generated.yml`). If you set `inventory_file` to a visible
+name, keep it outside any directory you pass to `-i`.
+
+It only ever overwrites a file it wrote itself, recognised by its header line, or an empty
+one. Anything else - the inventory source file, another source the run has already parsed,
+a directory, a hand-written inventory, a `group_vars` file, a plugin configuration - fails
+the run naming the path, rather than losing a file the plugin cannot recreate. The write
+goes through a temporary file in the same directory that is flushed to disk and then moved
+into place, so an interrupted run or a crash cannot leave half an inventory behind. An
+existing file keeps its permissions; a new one gets the mode your umask gives a new file.
 
 ### Committing it
 
@@ -616,7 +627,6 @@ it, so a run that "worked" but produced the wrong thing explains itself:
 | `no hosts were added, leaving <path> as it is` | Every device was filtered out or none was returned, so an existing snapshot file is deliberately left alone - see [Writing the inventory to a file](#writing-the-inventory-to-a-file) |
 | `inventory_file <path> does not end in .yml, .yaml or .json` | The file is written, but `ansible -i` will not read that name back |
 | `host <name> contains one of [ ] :` | The snapshot is written, but a YAML inventory reads that name as a port or a host range rather than as this host |
-| `<host>: <field> contains Jinja2 delimiters` | A LibreNMS value holds `{{ ... }}`, which a live run leaves literal but a snapshot evaluates - see [Writing the inventory to a file](#writing-the-inventory-to-a-file) |
 
 At `-vvvv` every step is reported as it happens - options being applied, each API request
 and whether it came from the cache, each device that was skipped and why, the hardware

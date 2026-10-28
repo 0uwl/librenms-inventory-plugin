@@ -1,6 +1,6 @@
 {
   "status": "ok",
-  "count": 1,
+  "count": 2,
   "devices": [
     {
       "device_id": 1,
@@ -21,6 +21,26 @@
       "version": "15.2(7)",
       "uptime": 123456,
       "ip": "10.0.0.1"
+    },
+    {
+      "device_id": 2,
+      "hostname": "tpl-sw2.example.com",
+      "sysName": "tpl-sw2",
+      "os": "ios",
+      "os_version": "15.2",
+      "hardware": "C9300",
+      "type": "network",
+      "status": 1,
+      "location": "DC1",
+      "location_id": 1,
+      "disabled": 0,
+      "ignore": 0,
+      "notes": "---\nnested:\n  \"{{ lookup('env', 'HOME') }}\": key\ncomment: \"{# not a comment #}\"\n",
+      "vendor": "Cisco",
+      "serial": "ABC123",
+      "version": "15.2(7)",
+      "uptime": 123456,
+      "ip": "10.0.0.2"
     }
   ]
 }

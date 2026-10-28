@@ -18,7 +18,8 @@ cache_timeout: 600
 # touching the API at all. It is a snapshot, not a cache, and nothing reads it back -
 # see the README's "Writing the inventory to a file" section. A relative path resolves
 # against this file's directory; leave inventory_file out and it defaults to
-# librenms.generated.yml beside this file.
+# .librenms.generated.yml beside this file - hidden, so that `-i` naming this directory
+# does not parse it as a second source.
 # write_to_file: true
 # inventory_file: ./inventory/librenms.yml
 
