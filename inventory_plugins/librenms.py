@@ -46,6 +46,74 @@ DOCUMENTATION = r"""
             description: Extra HTTP headers to send with every request to the LibreNMS API.
             type: dict
             default: {}
+        create_snapshot:
+            description:
+                - Write the inventory the run produced out to a static YAML inventory file,
+                  on top of the inventory handed to the run in progress.
+                - The file is in Ansible's own inventory format, so it is usable as an
+                  inventory source by itself (C(-i inventory/librenms.yml)), which runs
+                  entirely offline without calling the LibreNMS API at all.
+                - It is a snapshot, never read back by this plugin. Caching within a run is a
+                  separate thing and stays with I(cache) and I(cache_timeout), which cache the
+                  raw API responses and so still pick up a later change to an option like
+                  I(group_name_mapping). This file holds the already rendered result and would
+                  not.
+                - Hosts are written under C(all) with their host vars inline, and each Ansible
+                  group as a child of C(all) listing its members by name, so a host in several
+                  device groups is listed under each of them and a host in none is listed under
+                  C(all) only. The groups Ansible creates for every inventory (C(all),
+                  C(ungrouped)) are not written as groups of their own.
+                - Only what this plugin added goes in. An inventory source parsed before this
+                  one is not written, and a C(constructed) source chained after it is parsed
+                  later, so its groups and composed vars are not either - chain C(constructed)
+                  over the file exactly as you chain it over this plugin.
+                - The file holds every host var the run set, so with I(exclude_fields) emptied
+                  the SNMP credentials LibreNMS reports land in plaintext on disk.
+                - A value LibreNMS reported is untrusted on a live run, so Ansible never
+                  templates it. A host var value holding a brace, which every Jinja2 delimiter
+                  starts with, is written with YAML's C(!unsafe) tag, which keeps it untrusted
+                  when read back from the file too, so a device field holding a Jinja2
+                  expression stays literal either way.
+                - Nothing is written when the run added no hosts at all, so a run that filtered
+                  everything out cannot truncate a good snapshot. Reported at C(-v).
+                - Hosts, groups and var keys are sorted and no timestamp is written, so a run
+                  that found nothing new rewrites the same bytes and a diff means the inventory
+                  really changed. An existing file's permissions are kept, and a new one is
+                  created with the default your umask gives.
+            type: bool
+            default: false
+        snapshot_file:
+            description:
+                - Path of the file I(create_snapshot) writes, filename included.
+                - A relative path resolves against the directory holding the inventory source
+                  file rather than the current working directory, so the output lands in the
+                  same place however C(ansible) was invoked. C(~) and environment variables are
+                  expanded, and a variable that is not set fails the run naming it. A symlink
+                  is followed, so the file it points to is updated and the link is kept. The
+                  path it resolved to is reported at C(-vvvv).
+                - Defaults to the inventory source file's own name, with a leading C(.) and
+                  C(.generated.yml) in place of its extension, next to it, so I(create_snapshot)
+                  on its own writes C(librenms.yml) out to C(.librenms.generated.yml). The dot
+                  keeps it out of a run that passes the whole directory to C(-i), since Ansible
+                  skips hidden files there. C(-i) naming the file itself still reads it.
+                  Derived rather than fixed so that two LibreNMS sources in one run do not
+                  silently overwrite each other.
+                - Missing parent directories are created. A path that cannot be written - no
+                  permission, a read-only filesystem, a file where a directory would have to be
+                  - fails the run naming the path and the reason rather than raising a traceback.
+                  The path is vetted before the first API call, so one that cannot work costs no
+                  requests.
+                - Only ever overwrites a file this plugin wrote itself, recognised by its header
+                  line, or an empty one. It refuses this inventory source file, an inventory
+                  source the run has already parsed, a directory, and any other existing file,
+                  failing the run naming the path.
+                - Written through a temporary file in the same directory, flushed to disk and
+                  moved into place, so an interrupted run cannot leave half an inventory where a
+                  whole one was.
+                - Ansible's C(yaml) inventory plugin only reads back files ending in C(.yml),
+                  C(.yaml) or C(.json). Any other extension is reported at C(-v) - the file is
+                  still written, but C(-i) will not read it.
+            type: str
         cache_force_update:
             description:
                 - Force a cache refresh for this run, regardless of I(cache_timeout).
@@ -252,6 +320,13 @@ cache_plugin: jsonfile
 cache_connection: /tmp/librenms_inventory_cache
 cache_timeout: 600
 
+# Also write the inventory out as a static YAML inventory file. That file is a real
+# inventory source on its own (`-i inventory/librenms.yml`), so a run over it never
+# touches the API. It is a snapshot, not a cache - see the README's "Writing the
+# inventory to a file" section.
+create_snapshot: false
+# snapshot_file: ./inventory/librenms.yml
+
 exclude_disabled: true
 exclude_ignored: true
 
@@ -292,8 +367,11 @@ hardware_trimming_patterns:
 lowercase_hardware_family: true
 """
 
+import contextlib
 import json
+import os
 import re
+import tempfile
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -305,12 +383,62 @@ from ansible.errors import AnsibleError
 from ansible.inventory.group import to_safe_group_name
 from ansible.module_utils.common.text.converters import to_text
 from ansible.module_utils.urls import open_url
+from ansible.parsing.yaml.dumper import AnsibleDumper
 from ansible.plugins.inventory import BaseInventoryPlugin, Cacheable
 
 # Ansible creates these two itself for every inventory (see InventoryData.__init__), so a
 # LibreNMS device group of the same name silently merges into one of them instead of
 # becoming a group of its own.
 IMPLICIT_GROUPS = ("all", "ungrouped")
+
+# The first line of every snapshot. It is how the plugin recognises a file it wrote
+# itself, which is the only kind of existing file it will overwrite.
+SNAPSHOT_HEADER_PREFIX = "# Ansible inventory written by the librenms inventory plugin"
+
+# What Ansible's own yaml inventory plugin will read back (its yaml_extensions option,
+# plus a name with no extension at all). A snapshot written under any other name is a
+# file that nothing can load, which is worth saying out loud.
+READABLE_SNAPSHOT_EXTENSIONS = ("", ".yml", ".yaml", ".json")
+
+# A host key in a YAML inventory is a pattern, not a name: Ansible runs it through
+# parse_address() and expand_hostname_range(), so "host:8022" reads back as the host
+# "host" with ansible_port 8022, and "sw[1:3]" reads back as three hosts. Quoting does
+# not help, the expansion happens after the YAML is parsed.
+UNROUNDTRIPPABLE_HOSTNAME_CHARS = ("[", "]", ":")
+
+
+
+class _Unsafe:
+    """A host var value to be written with YAML's !unsafe tag
+
+    A value LibreNMS reported is untrusted on a live run, so Ansible never templates it,
+    while a value read back out of a static inventory file is trusted and would be. The
+    !unsafe tag makes Ansible's loader construct the value - and everything nested inside
+    it, mapping keys included - as untrusted, so the snapshot reads back the same as the
+    live run it was taken from.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+
+def _represent_unsafe(dumper, data):
+    node = dumper.represent_data(data.value)
+    node.tag = "!unsafe"
+    return node
+
+
+def _snapshot_dumper(*args, **kwargs):
+    """AnsibleDumper, plus the !unsafe tag for values wrapped in _Unsafe
+
+    AnsibleDumper is a factory function rather than a class since ansible-core 2.19, so
+    the representer is added to the instance it returns instead of to a subclass.
+    """
+    dumper = AnsibleDumper(*args, **kwargs)
+    dumper.yaml_representers = {**dumper.yaml_representers, _Unsafe: _represent_unsafe}
+    return dumper
 
 
 class InventoryModule(BaseInventoryPlugin, Cacheable):
@@ -710,7 +838,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             if parsed is not None:
                 self._step(f"{hostname}: adding {len(parsed)} vars from the {source} field")
                 for field, value in parsed.items():
-                    self.inventory.set_variable(hostname, field, value)
+                    self._set_host_var(hostname, field, value)
 
         for field, value in device.items():
             if field in self.exclude_fields:
@@ -720,7 +848,22 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 self._set_hardware_variables(hostname, device, value)
                 continue
 
-            self.inventory.set_variable(hostname, "libre_" + field, value)
+            self._set_host_var(hostname, "libre_" + field, value)
+
+    def _set_host_var(self, hostname, field, value):
+        """Set a host var, and record it as one this plugin set
+
+        The InventoryData object is shared by every inventory source in a run, so the
+        host's vars as Ansible holds them can include another source's. The snapshot is
+        built from this record instead, so it holds what this plugin set and nothing else.
+
+        Args:
+            hostname (str): The hostname of the device
+            field (str): The name of the host var
+            value: The value of the host var
+        """
+        self.inventory.set_variable(hostname, field, value)
+        self.added_vars[hostname][field] = value
 
     def _set_hardware_variables(self, hostname, device, hardware_value):
         """Sets libre_hardware, plus the derived family and variant vars when trimming is on
@@ -733,7 +876,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             device (dict): The full device dictionary fetched from the API
             hardware_value: The device's hardware value, as reported by LibreNMS
         """
-        self.inventory.set_variable(hostname, "libre_hardware", hardware_value)
+        self._set_host_var(hostname, "libre_hardware", hardware_value)
 
         # LibreNMS does not report hardware for devices it can not identify
         if not self.hardware_trimming_patterns or not isinstance(hardware_value, str):
@@ -751,11 +894,11 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             f"{'variant ' + variant if variant else 'no variant'}"
         )
 
-        self.inventory.set_variable(hostname, "libre_hardware_family", family)
+        self._set_host_var(hostname, "libre_hardware_family", family)
 
         # Do not set a variable if no variant data was found
         if variant is not None:
-            self.inventory.set_variable(hostname, "libre_hardware_variant", variant)
+            self._set_host_var(hostname, "libre_hardware_variant", variant)
 
     def _parse_notes(self, hostname, notes_value: str):
         """Parses the LibreNMS notes field as YAML
@@ -1048,6 +1191,335 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             self._step(f"adding {hostname} to group {transformed_group_name}")
             # Add the host to the group
             self.inventory.add_host(group=transformed_group_name, host=hostname)
+            self.added_groups[transformed_group_name].add(hostname)
+
+    # --- Snapshot file --------------------------------------------------
+
+    def _resolve_snapshot_path(self, source_path):
+        """Work out the absolute path the snapshot should be written to
+
+        A relative snapshot_file resolves against the directory holding the inventory
+        source file rather than the current working directory, so that the snapshot lands
+        in the same place whether ansible was run from the project root or from somewhere
+        below it.
+
+        Args:
+            source_path (str): Path of the inventory source file being parsed
+
+        Returns:
+            str: The absolute path to write the snapshot to
+        """
+        source_path = os.path.abspath(source_path)
+        source_dir = os.path.dirname(source_path)
+
+        configured = self.get_option("snapshot_file")
+        if configured:
+            target = os.path.expanduser(os.path.expandvars(configured))
+            # expandvars leaves a variable that is not set as it was, which would quietly
+            # create a directory literally named after it
+            unexpanded = re.search(r"\$(\w+|\{[^}]*\})", target)
+            if unexpanded:
+                raise AnsibleError(
+                    f"snapshot_file {configured} refers to the environment variable "
+                    f"{unexpanded.group(0)}, which is not set."
+                )
+        else:
+            # eg. librenms.yml -> .librenms.generated.yml. Derived from the source file's
+            # name so that two LibreNMS sources in one run do not land on one file, and
+            # hidden because Ansible skips hidden files when -i names a directory - the
+            # snapshot would otherwise be parsed as a second inventory source beside this one.
+            target = "." + os.path.splitext(os.path.basename(source_path))[0] + ".generated.yml"
+            self._step(f"snapshot_file is unset, defaulting to {target}")
+
+        if not os.path.isabs(target):
+            target = os.path.join(source_dir, target)
+        # Followed through any symlink, so that the file the link points at is the one
+        # replaced and the link itself is left in place
+        target = os.path.realpath(target)
+
+        if os.path.isdir(target):
+            raise AnsibleError(
+                f"snapshot_file resolved to {target}, which is an existing directory. "
+                f"It has to name the file to write, filename included."
+            )
+
+        # The default name in the source file's own directory is one typo away from the
+        # plugin writing its output over the configuration that produced it
+        if self._is_same_file(target, source_path):
+            raise AnsibleError(
+                f"snapshot_file resolved to {target}, which is the inventory source file "
+                f"itself. Writing the inventory there would destroy the configuration that "
+                f"produced it. Point it at a different file."
+            )
+
+        # A mistyped path lands in the same directory as the source, where the other
+        # inventory sources of the run live too
+        for processed in self.inventory.processed_sources:
+            if self._is_same_file(target, processed):
+                raise AnsibleError(
+                    f"snapshot_file resolved to {target}, which is an inventory source this "
+                    f"run has already parsed. Point it at a file that is not itself an "
+                    f"inventory source - if -i names a directory, put it outside that "
+                    f"directory or give it a name starting with '.', which Ansible skips there."
+                )
+
+        if not self._is_own_snapshot(target):
+            raise AnsibleError(
+                f"snapshot_file resolved to {target}, which exists and was not written by "
+                f"this plugin. Refusing to overwrite it - delete it or point snapshot_file "
+                f"elsewhere."
+            )
+
+        if os.path.splitext(target)[1].lower() not in READABLE_SNAPSHOT_EXTENSIONS:
+            self._problem(
+                f"snapshot_file {target} does not end in .yml, .yaml or .json, so "
+                f"ansible -i will not read it back. The file is still written."
+            )
+
+        self._step(f"create_snapshot is on, the snapshot will be written to {target}")
+        return target
+
+    @staticmethod
+    def _is_same_file(target, other):
+        """Test whether two paths name the same file, whether or not the first exists yet
+
+        Args:
+            target (str): The path the snapshot would be written to
+            other (str): The path to compare it against
+
+        Returns:
+            bool: True if the two name one file
+        """
+        other = os.path.abspath(other)
+        if target == other:
+            return True
+        # samefile() needs both to exist, and the target normally does not yet
+        return os.path.exists(target) and os.path.exists(other) and os.path.samefile(target, other)
+
+    @staticmethod
+    def _is_own_snapshot(target):
+        """Test whether a file is one this plugin may overwrite
+
+        That is a file this plugin wrote itself, recognised by its header line, or one
+        that is missing or empty. Anything else - a hand-written inventory, a group_vars
+        file, a plugin configuration in whatever YAML style - is the user's, and
+        overwriting it would lose it.
+
+        Args:
+            target (str): The path the snapshot would be written to
+
+        Returns:
+            bool: True if the snapshot may be written there
+        """
+        try:
+            with open(target, encoding="utf-8", errors="replace") as handle:
+                head = handle.read(len(SNAPSHOT_HEADER_PREFIX))
+        except OSError:
+            # Absent, or unreadable - the write itself reports whatever actually stops it
+            return True
+
+        return head == "" or head == SNAPSHOT_HEADER_PREFIX
+
+    @classmethod
+    def _could_be_a_template(cls, value):
+        """Test whether a host var value holds anything Jinja2 could evaluate
+
+        Every Jinja2 delimiter starts with a brace, so a value without one anywhere in it -
+        its strings, or the keys of a mapping inside it - is never templated.
+
+        Args:
+            value: A host var value, of whatever type the API or the Notes field produced
+
+        Returns:
+            bool: True if the value, or anything inside it, holds a brace
+        """
+        if isinstance(value, str):
+            return "{" in value
+        if isinstance(value, dict):
+            return any(
+                cls._could_be_a_template(key) or cls._could_be_a_template(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, (list, tuple)):
+            return any(cls._could_be_a_template(item) for item in value)
+        return False
+
+    @classmethod
+    def _mark_unsafe(cls, value):
+        """Wrap a host var value so it is written with YAML's !unsafe tag, where it needs one
+
+        Only a value that could be a template is tagged. Ansible's loader resolves an
+        !unsafe scalar's type afresh, as though it had been written unquoted, so tagging
+        every string would read "15.2" back as a float and "" as null. A string holding
+        a brace never resolves to anything but a string, so the tagged ones are safe.
+
+        Args:
+            value: A host var value, of whatever type the API or the Notes field produced
+
+        Returns:
+            The value, wrapped in _Unsafe if it could be a template
+        """
+        if cls._could_be_a_template(value):
+            return _Unsafe(value)
+        return value
+
+    def _build_snapshot(self):
+        """Build the inventory this run produced, in Ansible's own YAML inventory format
+
+        Only what this plugin added goes in. The InventoryData object is shared by every
+        inventory source in a run, so reading it whole would put an earlier source's hosts
+        - and their vars - into this plugin's snapshot.
+
+        Host vars are written once, under "all", and each group lists its hosts with no
+        value of their own. Ansible's yaml inventory plugin reads a null host entry as
+        "a member of this group, no vars here", so a host in several groups is listed in
+        each without its vars being repeated, and a host in no group at all is still
+        covered by being under "all".
+
+        Returns:
+            snapshot(dict): The inventory, ready to be serialized as YAML
+        """
+        self._step(f"building a snapshot of {len(self.added_hosts)} hosts")
+
+        hosts = {}
+        for hostname in sorted(self.added_hosts):
+            if any(char in hostname for char in UNROUNDTRIPPABLE_HOSTNAME_CHARS):
+                self._problem(
+                    f"host {hostname} contains one of {' '.join(UNROUNDTRIPPABLE_HOSTNAME_CHARS)}, "
+                    f"which a YAML inventory reads as a port or a host range, so the snapshot "
+                    f"will not read back as this host."
+                )
+
+            host_vars = {
+                field: self._mark_unsafe(value)
+                for field, value in self.added_vars[hostname].items()
+            }
+
+            # A host with nothing left is still a host, it just carries no vars
+            hosts[hostname] = host_vars or None
+
+        snapshot = {"all": {"hosts": hosts}}
+
+        children = {
+            group_name: {"hosts": dict.fromkeys(sorted(hostnames))}
+            for group_name, hostnames in self.added_groups.items()
+            if group_name not in IMPLICIT_GROUPS
+        }
+        if children:
+            self._step(f"snapshot has {len(children)} groups")
+            snapshot["all"]["children"] = children
+        else:
+            self._step("snapshot has no groups")
+
+        return snapshot
+
+    def _write_snapshot(self):
+        """Write the snapshot to the path resolved from snapshot_file
+
+        The file is replaced atomically, so a run that is interrupted part way through
+        the write cannot leave half an inventory behind for the next one to read.
+        """
+        if not self.added_hosts:
+            self._problem(
+                f"no hosts were added, leaving {self.snapshot_path} as it is. A snapshot is "
+                f"only written for a run that produced hosts."
+            )
+            return
+
+        snapshot = self._build_snapshot()
+
+        # No timestamp: with the contents sorted and nothing else moving, the file is a
+        # diff only when the inventory itself changed, which is what makes a committed
+        # snapshot worth reviewing
+        header = (
+            f"{SNAPSHOT_HEADER_PREFIX} from {self.snapshot_source}.\n"
+            "# Generated file - regenerate it rather than editing it, the next run overwrites it.\n"
+        )
+
+        try:
+            # AnsibleDumper, not safe_dump: in a real run InventoryManager hands the plugin
+            # a wrapper that tags every value it sets, so host vars come back as
+            # _AnsibleTaggedStr/_AnsibleTaggedInt and friends, which safe_dump cannot
+            # represent. AnsibleDumper writes them as the plain scalars they are. It also
+            # covers the datetime a Notes field can parse into.
+            body = yaml.dump(
+                snapshot,
+                Dumper=_snapshot_dumper,
+                sort_keys=True,
+                default_flow_style=False,
+                allow_unicode=True,
+                # Keeps PyYAML from reflowing at 80 columns, where one value getting longer
+                # rewrites the lines around it
+                width=4096,
+                explicit_start=True,
+            )
+        except yaml.YAMLError as e:
+            raise AnsibleError(
+                f"The inventory could not be serialized as YAML for {self.snapshot_path}: {e}"
+            ) from e
+
+        target_dir = os.path.dirname(self.snapshot_path) or "."
+        # A snapshot can hold whatever exclude_fields did not strip, so a mode the user
+        # already chose for the file is kept rather than widened back to the default, and
+        # a new file gets what a plain open() would have given it under the user's umask
+        try:
+            mode = os.stat(self.snapshot_path).st_mode & 0o777
+        except OSError:
+            mode = 0o666 & ~self._current_umask()
+
+        temp_path = None
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            # Written in the target's own directory so the replace below stays on one
+            # filesystem, where it is atomic
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=target_dir,
+                prefix=".librenms-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temp_path = handle.name
+                handle.write(header)
+                handle.write(body)
+                # On disk before the rename, or a crash right after it can leave the new
+                # name pointing at an empty file
+                handle.flush()
+                os.fsync(handle.fileno())
+            # NamedTemporaryFile creates the file 0600; an inventory is an ordinary file
+            os.chmod(temp_path, mode)
+            os.replace(temp_path, self.snapshot_path)
+        except OSError as e:
+            if temp_path:
+                with contextlib.suppress(OSError):
+                    os.unlink(temp_path)
+            raise AnsibleError(
+                f"Could not write the inventory snapshot to {self.snapshot_path}: {e}. "
+                f"Check snapshot_file, and that {target_dir} is writable."
+            ) from e
+
+        # The rename itself is only durable once the directory entry is. Best effort: not
+        # every platform or filesystem lets a directory be opened for this
+        with contextlib.suppress(OSError):
+            dir_fd = os.open(target_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+        self._step(f"snapshot written to {self.snapshot_path}")
+
+    @staticmethod
+    def _current_umask():
+        """Read the process umask, which Python can only do by setting it
+
+        Returns:
+            int: The umask
+        """
+        umask = os.umask(0)
+        os.umask(umask)
+        return umask
 
     # --- Main flow ------------------------------------------------------
 
@@ -1075,6 +1547,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
             self._step(f"adding host {hostname}")
             self.inventory.add_host(hostname)
+            self.added_hosts.add(hostname)
             added += 1
 
             self._set_host_variables(hostname, device)
@@ -1163,9 +1636,31 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             f"cache_force_update is {'on' if self.cache_force_update else 'off'}"
         )
 
+        # Tracked while populating so that the snapshot holds the hosts and groups this
+        # plugin added and nothing else - the InventoryData object is shared with every
+        # other inventory source in the run
+        self.added_hosts = set()
+        self.added_groups = defaultdict(set)
+        self.added_vars = defaultdict(dict)
+
+        self.create_snapshot = self.get_option("create_snapshot")
+        # Named relative so that two people regenerating the file from different checkouts
+        # still produce the same bytes
+        self.snapshot_source = os.path.basename(path)
+        self.snapshot_path = None
+        if self.create_snapshot:
+            # Resolved before the API is called, so a path that can never be written to
+            # fails the run now rather than after a full set of requests
+            self.snapshot_path = self._resolve_snapshot_path(path)
+        else:
+            self._step("create_snapshot is off, no snapshot file will be written")
+
         self._step("options applied")
 
         # Populate the dynamic inventory
         self._populate()
+
+        if self.create_snapshot:
+            self._write_snapshot()
 
         self._step("done")
