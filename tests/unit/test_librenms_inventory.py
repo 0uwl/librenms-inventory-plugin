@@ -898,22 +898,22 @@ class TestCaching(LibrenmsInventoryTestCase):
 
 
 class TestSnapshotFile(LibrenmsInventoryTestCase):
-    """write_to_file writes the populated inventory out as a static YAML inventory file.
+    """create_snapshot writes the populated inventory out as a static YAML inventory file.
     It sits next to the caching tests deliberately: it is the other feature that leaves
     something on disk, and the one it keeps being mistaken for."""
 
     def snapshot(self, work_dir, routes=None, call_log=None, name="snap.yml", **overrides):
-        """Run the plugin with write_to_file on, from an inventory source inside work_dir
+        """Run the plugin with create_snapshot on, from an inventory source inside work_dir
 
         Args:
             work_dir (str): Directory to put the inventory source, and the snapshot, in
-            name (str): inventory_file, relative to work_dir unless overridden
+            name (str): snapshot_file, relative to work_dir unless overridden
 
         Returns:
             (plugin, inventory, path): The plugin, the inventory and the snapshot's path
         """
-        overrides.setdefault("write_to_file", True)
-        overrides.setdefault("inventory_file", name)
+        overrides.setdefault("create_snapshot", True)
+        overrides.setdefault("snapshot_file", name)
         plugin, inventory = self.build_plugin(
             routes=routes, call_log=call_log, config_dir=work_dir, **overrides
         )
@@ -956,7 +956,7 @@ class TestSnapshotFile(LibrenmsInventoryTestCase):
             self.assertEqual(
                 os.listdir(work),
                 [os.path.basename(self.last_config)],
-                "write_to_file defaults to off, so nothing but the source should be there",
+                "create_snapshot defaults to off, so nothing but the source should be there",
             )
 
     def test_the_document_is_a_single_top_level_all_group(self):
@@ -1055,7 +1055,7 @@ class TestSnapshotFile(LibrenmsInventoryTestCase):
         # contributed must not end up in this plugin's snapshot
         with tempfile.TemporaryDirectory() as work:
             config_path = write_config(
-                config_dir=work, write_to_file=True, inventory_file="snap.yml"
+                config_dir=work, create_snapshot=True, snapshot_file="snap.yml"
             )
             self._configs.append(config_path)
 
@@ -1073,7 +1073,7 @@ class TestSnapshotFile(LibrenmsInventoryTestCase):
     def test_vars_another_source_set_on_a_shared_host_are_not_written(self):
         with tempfile.TemporaryDirectory() as work:
             config_path = write_config(
-                config_dir=work, write_to_file=True, inventory_file="snap.yml"
+                config_dir=work, create_snapshot=True, snapshot_file="snap.yml"
             )
             self._configs.append(config_path)
 
@@ -1185,7 +1185,7 @@ class TestSnapshotFile(LibrenmsInventoryTestCase):
 
     def test_the_default_path_is_the_hidden_source_name_with_generated_yml(self):
         with tempfile.TemporaryDirectory() as work:
-            self.build_plugin(config_dir=work, write_to_file=True)
+            self.build_plugin(config_dir=work, create_snapshot=True)
 
             stem = os.path.splitext(os.path.basename(self.last_config))[0]
             expected = os.path.join(work, "." + stem + ".generated.yml")
@@ -1195,7 +1195,7 @@ class TestSnapshotFile(LibrenmsInventoryTestCase):
         # The snapshot sits beside the source, so with -i naming the directory a visible
         # one would be parsed as a second source on the next run - and refused as one
         with tempfile.TemporaryDirectory() as work:
-            self.build_plugin(config_dir=work, write_to_file=True)
+            self.build_plugin(config_dir=work, create_snapshot=True)
             plugin = get_plugin_instance()
             modname = type(plugin).__module__
 
@@ -1264,7 +1264,7 @@ class TestSnapshotFile(LibrenmsInventoryTestCase):
     # --- what it refuses to do ---
 
     def test_it_refuses_to_write_over_the_inventory_source_file(self):
-        # Written by hand rather than through write_config, since inventory_file has to
+        # Written by hand rather than through write_config, since snapshot_file has to
         # name the source's own filename and write_config picks a random one
         with tempfile.TemporaryDirectory() as work:
             config_path = os.path.join(work, "librenms.yml")
@@ -1274,8 +1274,8 @@ class TestSnapshotFile(LibrenmsInventoryTestCase):
                     "api_endpoint: https://fake-librenms.example.com/api/v0\n"
                     "api_token: test-token\n"
                     "cache: false\n"
-                    "write_to_file: true\n"
-                    "inventory_file: librenms.yml\n"
+                    "create_snapshot: true\n"
+                    "snapshot_file: librenms.yml\n"
                 )
             before = open(config_path, "rb").read()
 
@@ -1341,7 +1341,7 @@ class TestSnapshotFile(LibrenmsInventoryTestCase):
             with open(os.path.join(work, "blocker"), "w") as handle:
                 handle.write("not a directory\n")
 
-            with self.assertRaisesRegex(AnsibleError, "inventory_file"):
+            with self.assertRaisesRegex(AnsibleError, "snapshot_file"):
                 self.snapshot(work, name=os.path.join("blocker", "snap.yml"))
 
     def test_a_value_holding_a_template_reads_back_untemplated(self):
@@ -1592,25 +1592,25 @@ class TestDisplayMessages(LibrenmsInventoryTestCase):
     def test_the_resolved_snapshot_path_is_reported_at_vvvv(self):
         with tempfile.TemporaryDirectory() as work:
             steps, _, _ = self.capture_display(
-                config_dir=work, write_to_file=True, inventory_file="snap.yml"
+                config_dir=work, create_snapshot=True, snapshot_file="snap.yml"
             )
             joined = "\n".join(steps)
 
-            # The absolute path, so a relative inventory_file is not left ambiguous
+            # The absolute path, so a relative snapshot_file is not left ambiguous
             self.assertIn(f"the snapshot will be written to {os.path.join(work, 'snap.yml')}", joined)
             self.assertIn("snapshot written to", joined)
 
-    def test_write_to_file_being_off_is_reported_at_vvvv(self):
+    def test_create_snapshot_being_off_is_reported_at_vvvv(self):
         steps, _, _ = self.capture_display()
 
-        self.assertIn("write_to_file is off, no snapshot file will be written", "\n".join(steps))
+        self.assertIn("create_snapshot is off, no snapshot file will be written", "\n".join(steps))
 
     def test_not_writing_an_empty_snapshot_is_reported_at_v(self):
         with tempfile.TemporaryDirectory() as work:
             _, problems, _ = self.capture_display(
                 config_dir=work,
-                write_to_file=True,
-                inventory_file="snap.yml",
+                create_snapshot=True,
+                snapshot_file="snap.yml",
                 host_name_regex_filter=["^nothing-matches-this$"],
             )
 
@@ -1622,7 +1622,7 @@ class TestDisplayMessages(LibrenmsInventoryTestCase):
     def test_an_extension_ansible_cannot_read_back_is_reported_at_v(self):
         with tempfile.TemporaryDirectory() as work:
             _, problems, _ = self.capture_display(
-                config_dir=work, write_to_file=True, inventory_file="snap.txt"
+                config_dir=work, create_snapshot=True, snapshot_file="snap.txt"
             )
 
             self.assertTrue(

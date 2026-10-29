@@ -46,7 +46,7 @@ DOCUMENTATION = r"""
             description: Extra HTTP headers to send with every request to the LibreNMS API.
             type: dict
             default: {}
-        write_to_file:
+        create_snapshot:
             description:
                 - Write the inventory the run produced out to a static YAML inventory file,
                   on top of the inventory handed to the run in progress.
@@ -82,9 +82,9 @@ DOCUMENTATION = r"""
                   created with the default your umask gives.
             type: bool
             default: false
-        inventory_file:
+        snapshot_file:
             description:
-                - Path of the file I(write_to_file) writes, filename included.
+                - Path of the file I(create_snapshot) writes, filename included.
                 - A relative path resolves against the directory holding the inventory source
                   file rather than the current working directory, so the output lands in the
                   same place however C(ansible) was invoked. C(~) and environment variables are
@@ -92,7 +92,7 @@ DOCUMENTATION = r"""
                   is followed, so the file it points to is updated and the link is kept. The
                   path it resolved to is reported at C(-vvvv).
                 - Defaults to the inventory source file's own name, with a leading C(.) and
-                  C(.generated.yml) in place of its extension, next to it, so I(write_to_file)
+                  C(.generated.yml) in place of its extension, next to it, so I(create_snapshot)
                   on its own writes C(librenms.yml) out to C(.librenms.generated.yml). The dot
                   keeps it out of a run that passes the whole directory to C(-i), since Ansible
                   skips hidden files there. C(-i) naming the file itself still reads it.
@@ -324,8 +324,8 @@ cache_timeout: 600
 # inventory source on its own (`-i inventory/librenms.yml`), so a run over it never
 # touches the API. It is a snapshot, not a cache - see the README's "Writing the
 # inventory to a file" section.
-write_to_file: false
-# inventory_file: ./inventory/librenms.yml
+create_snapshot: false
+# snapshot_file: ./inventory/librenms.yml
 
 exclude_disabled: true
 exclude_ignored: true
@@ -1198,7 +1198,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
     def _resolve_snapshot_path(self, source_path):
         """Work out the absolute path the snapshot should be written to
 
-        A relative inventory_file resolves against the directory holding the inventory
+        A relative snapshot_file resolves against the directory holding the inventory
         source file rather than the current working directory, so that the snapshot lands
         in the same place whether ansible was run from the project root or from somewhere
         below it.
@@ -1212,7 +1212,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         source_path = os.path.abspath(source_path)
         source_dir = os.path.dirname(source_path)
 
-        configured = self.get_option("inventory_file")
+        configured = self.get_option("snapshot_file")
         if configured:
             target = os.path.expanduser(os.path.expandvars(configured))
             # expandvars leaves a variable that is not set as it was, which would quietly
@@ -1220,7 +1220,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             unexpanded = re.search(r"\$(\w+|\{[^}]*\})", target)
             if unexpanded:
                 raise AnsibleError(
-                    f"inventory_file {configured} refers to the environment variable "
+                    f"snapshot_file {configured} refers to the environment variable "
                     f"{unexpanded.group(0)}, which is not set."
                 )
         else:
@@ -1229,7 +1229,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             # hidden because Ansible skips hidden files when -i names a directory - the
             # snapshot would otherwise be parsed as a second inventory source beside this one.
             target = "." + os.path.splitext(os.path.basename(source_path))[0] + ".generated.yml"
-            self._step(f"inventory_file is unset, defaulting to {target}")
+            self._step(f"snapshot_file is unset, defaulting to {target}")
 
         if not os.path.isabs(target):
             target = os.path.join(source_dir, target)
@@ -1239,7 +1239,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         if os.path.isdir(target):
             raise AnsibleError(
-                f"inventory_file resolved to {target}, which is an existing directory. "
+                f"snapshot_file resolved to {target}, which is an existing directory. "
                 f"It has to name the file to write, filename included."
             )
 
@@ -1247,7 +1247,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         # plugin writing its output over the configuration that produced it
         if self._is_same_file(target, source_path):
             raise AnsibleError(
-                f"inventory_file resolved to {target}, which is the inventory source file "
+                f"snapshot_file resolved to {target}, which is the inventory source file "
                 f"itself. Writing the inventory there would destroy the configuration that "
                 f"produced it. Point it at a different file."
             )
@@ -1257,7 +1257,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         for processed in self.inventory.processed_sources:
             if self._is_same_file(target, processed):
                 raise AnsibleError(
-                    f"inventory_file resolved to {target}, which is an inventory source this "
+                    f"snapshot_file resolved to {target}, which is an inventory source this "
                     f"run has already parsed. Point it at a file that is not itself an "
                     f"inventory source - if -i names a directory, put it outside that "
                     f"directory or give it a name starting with '.', which Ansible skips there."
@@ -1265,18 +1265,18 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         if not self._is_own_snapshot(target):
             raise AnsibleError(
-                f"inventory_file resolved to {target}, which exists and was not written by "
-                f"this plugin. Refusing to overwrite it - delete it or point inventory_file "
+                f"snapshot_file resolved to {target}, which exists and was not written by "
+                f"this plugin. Refusing to overwrite it - delete it or point snapshot_file "
                 f"elsewhere."
             )
 
         if os.path.splitext(target)[1].lower() not in READABLE_SNAPSHOT_EXTENSIONS:
             self._problem(
-                f"inventory_file {target} does not end in .yml, .yaml or .json, so "
+                f"snapshot_file {target} does not end in .yml, .yaml or .json, so "
                 f"ansible -i will not read it back. The file is still written."
             )
 
-        self._step(f"write_to_file is on, the snapshot will be written to {target}")
+        self._step(f"create_snapshot is on, the snapshot will be written to {target}")
         return target
 
     @staticmethod
@@ -1414,7 +1414,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         return snapshot
 
     def _write_snapshot(self):
-        """Write the snapshot to the path resolved from inventory_file
+        """Write the snapshot to the path resolved from snapshot_file
 
         The file is replaced atomically, so a run that is interrupted part way through
         the write cannot leave half an inventory behind for the next one to read.
@@ -1496,7 +1496,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                     os.unlink(temp_path)
             raise AnsibleError(
                 f"Could not write the inventory snapshot to {self.snapshot_path}: {e}. "
-                f"Check inventory_file, and that {target_dir} is writable."
+                f"Check snapshot_file, and that {target_dir} is writable."
             ) from e
 
         # The rename itself is only durable once the directory entry is. Best effort: not
@@ -1643,24 +1643,24 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         self.added_groups = defaultdict(set)
         self.added_vars = defaultdict(dict)
 
-        self.write_to_file = self.get_option("write_to_file")
+        self.create_snapshot = self.get_option("create_snapshot")
         # Named relative so that two people regenerating the file from different checkouts
         # still produce the same bytes
         self.snapshot_source = os.path.basename(path)
         self.snapshot_path = None
-        if self.write_to_file:
+        if self.create_snapshot:
             # Resolved before the API is called, so a path that can never be written to
             # fails the run now rather than after a full set of requests
             self.snapshot_path = self._resolve_snapshot_path(path)
         else:
-            self._step("write_to_file is off, no snapshot file will be written")
+            self._step("create_snapshot is off, no snapshot file will be written")
 
         self._step("options applied")
 
         # Populate the dynamic inventory
         self._populate()
 
-        if self.write_to_file:
+        if self.create_snapshot:
             self._write_snapshot()
 
         self._step("done")
