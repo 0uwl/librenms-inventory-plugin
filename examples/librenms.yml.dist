@@ -13,6 +13,16 @@ cache_plugin: jsonfile
 cache_connection: /tmp/librenms_inventory_cache
 cache_timeout: 600
 
+# Also write the inventory out as a static YAML inventory file. That file is a real
+# inventory source on its own, so `ansible -i inventory/librenms.yml` runs without
+# touching the API at all. It is a snapshot, not a cache, and nothing reads it back -
+# see the README's "Writing the inventory to a file" section. A relative path resolves
+# against this file's directory; leave snapshot_file out and it defaults to
+# .librenms.generated.yml beside this file - hidden, so that `-i` naming this directory
+# does not parse it as a second source.
+# create_snapshot: true
+# snapshot_file: ./inventory/librenms.yml
+
 exclude_disabled: true
 exclude_ignored: true
 
