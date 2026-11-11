@@ -12,6 +12,8 @@ DOCUMENTATION = r"""
         - Devices can be grouped by LibreNMS device group membership. For property-based
           grouping or composed vars, chain Ansible's standard C(constructed) inventory
           plugin as a second inventory source over this one's output.
+        - With I(mode=enrich) it adds no hosts itself, and instead looks up the hosts an
+          earlier inventory source defined, failing when one is not in LibreNMS.
     extends_documentation_fragment:
         - inventory_cache
     options:
@@ -46,6 +48,62 @@ DOCUMENTATION = r"""
             description: Extra HTTP headers to send with every request to the LibreNMS API.
             type: dict
             default: {}
+        mode:
+            description:
+                - What this inventory source does with the devices it fetches.
+                - C(source) makes every LibreNMS device a host. This is the default.
+                - C(enrich) adds no hosts of its own. It goes through the hosts an inventory
+                  source parsed before it (eg. a static C(hosts.ini)), looks each one up in
+                  LibreNMS, and sets the same C(libre_<field>) host vars and device group
+                  memberships on it that C(source) would. A host that cannot be found is an
+                  error, or a warning, as I(on_unmatched) says.
+                - In C(enrich) the static source has to come first, so it must be named
+                  before this one on the command line (C(-i hosts.ini -i librenms.yml)), or
+                  sort before it inside an inventory directory. With no hosts to enrich, the
+                  run fails rather than passing with nothing checked.
+                - Ansible only warns when an inventory source fails and carries on with the
+                  hosts the other sources gave it - unvalidated ones, in C(enrich). Set
+                  C(any_unparsed_is_failed = true) in the C([inventory]) section of
+                  C(ansible.cfg) (or C(ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED=true)) for an
+                  error to stop the run.
+                - In C(enrich), I(exclude_disabled), I(exclude_ignored),
+                  I(host_name_regex_filter) and I(hostname_field) do not apply, since they
+                  decide which devices become hosts. A host whose device is disabled or
+                  ignored in LibreNMS still matches it, and C(libre_disabled) and
+                  C(libre_ignore) say so. I(device_status_filter) and I(query_filters) still
+                  narrow the devices fetched, so a host whose device they leave out is not
+                  found.
+            type: str
+            choices: [source, enrich]
+            default: source
+        match_fields:
+            description:
+                - In I(mode=enrich), the LibreNMS device fields a host is looked up by.
+                - Matched case-insensitively, ignoring surrounding whitespace, after the same
+                  ASCII folding hostnames get in C(source) mode.
+            type: list
+            elements: str
+            default: [hostname, sysName, ip]
+        match_host_var:
+            description:
+                - In I(mode=enrich), a host var holding a second name or address to look the
+                  host up by, alongside its inventory hostname.
+                - Only vars set by an earlier inventory source are visible, not
+                  C(host_vars/) files, which Ansible loads after every source is parsed.
+                - When the inventory hostname and this var match two different devices, the
+                  host is ambiguous, which is always an error.
+            type: str
+            default: ansible_host
+        on_unmatched:
+            description:
+                - In I(mode=enrich), what to do with a host no LibreNMS device matches.
+                - C(error) fails the inventory source, naming every unmatched host at once.
+                  Nothing is set on any host.
+                - C(warn) prints a warning per unmatched host, leaves it as it is, and
+                  enriches the others.
+            type: str
+            choices: [error, warn]
+            default: error
         create_snapshot:
             description:
                 - Write the inventory the run produced out to a static YAML inventory file,
@@ -1524,6 +1582,13 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
     # --- Main flow ------------------------------------------------------
 
     def _populate(self):
+        """Populate the inventory in the configured mode"""
+        if self.mode == "enrich":
+            self._populate_enrich()
+        else:
+            self._populate_source()
+
+    def _populate_source(self):
         """Populate the dynamic inventory using data fetched from the LibreNMS API
         """
         self._step("populating the inventory")
@@ -1562,6 +1627,126 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 "every device was filtered out. Check exclude_disabled, exclude_ignored "
                 "and host_name_regex_filter."
             )
+
+    # --- Enrich mode ----------------------------------------------------
+
+    def _match_key(self, value):
+        """Normalize a name or address so that a host and a device field compare equal
+
+        Args:
+            value: A host name, host var or device field value
+
+        Returns:
+            str: The normalized value, empty if there is nothing to match on
+        """
+        if value is None:
+            return ""
+        return self._ascii_hostname(str(value)).strip().lower()
+
+    def _index_devices(self, devices):
+        """Index devices by every value of the configured match fields
+
+        Args:
+            devices (list): The devices fetched from the API
+
+        Returns:
+            index(defaultdict): Normalized value -> list of positions in devices. A list
+                                because two devices can share a value (eg. the same ip)
+        """
+        index = defaultdict(list)
+        for position, device in enumerate(devices):
+            for field in self.match_fields:
+                key = self._match_key(device.get(field))
+                if key and position not in index[key]:
+                    index[key].append(position)
+        self._step(f"indexed {len(devices)} devices by {', '.join(self.match_fields)}")
+        return index
+
+    def _match_host(self, hostname, index):
+        """Find the devices a host matches, by its name and by match_host_var
+
+        Args:
+            hostname (str): The inventory hostname
+            index (dict): The index built by _index_devices
+
+        Returns:
+            positions(set): Positions in the device list of every device matched
+        """
+        candidates = [hostname]
+        if self.match_host_var:
+            host = self.inventory.get_host(hostname)
+            value = host.vars.get(self.match_host_var) if host is not None else None
+            if value is not None:
+                candidates.append(value)
+
+        positions = set()
+        for candidate in candidates:
+            key = self._match_key(candidate)
+            if key:
+                positions.update(index.get(key, ()))
+        return positions
+
+    def _populate_enrich(self):
+        """Set LibreNMS host vars and groups on the hosts an earlier source added
+
+        Every host is matched before anything is set, so a run that fails leaves no host
+        half enriched.
+        """
+        self._step("enriching the existing inventory")
+
+        # Copied, since nothing below should ever add a host, but iterating the live dict
+        # would hide it if something did
+        hostnames = sorted(self.inventory.hosts)
+        if not hostnames:
+            raise AnsibleError(
+                "librenms: mode is enrich, but there are no hosts to enrich. Name the "
+                "inventory source holding them before this one (eg. -i hosts.ini -i "
+                "librenms.yml), or have it sort before this one in an inventory directory."
+            )
+        self._step(f"{len(hostnames)} hosts to enrich")
+
+        devices = self._get_devices()
+        index = self._index_devices(devices)
+
+        matched = {}
+        unmatched = []
+        ambiguous = []
+        for hostname in hostnames:
+            positions = self._match_host(hostname, index)
+            if not positions:
+                unmatched.append(hostname)
+            elif len(positions) > 1:
+                labels = sorted(self._device_label(devices[p]) for p in positions)
+                ambiguous.append(f"{hostname} ({', '.join(labels)})")
+            else:
+                matched[hostname] = devices[positions.pop()]
+
+        problems = []
+        if ambiguous:
+            problems.append("hosts matching more than one device: " + "; ".join(ambiguous))
+        if unmatched and self.on_unmatched == "error":
+            problems.append("hosts not found in LibreNMS: " + ", ".join(unmatched))
+        if problems:
+            raise AnsibleError(
+                f"librenms: {'. '.join(problems)}. Matched on the inventory hostname and "
+                f"{self.match_host_var or 'no host var'}, against "
+                f"{', '.join(self.match_fields)}."
+            )
+        for hostname in unmatched:
+            self.display.warning(f"[librenms] host {hostname} was not found in LibreNMS")
+
+        membership = {}
+        if self.device_groups_as_ansible_groups and matched:
+            membership = self._get_device_group_membership()
+
+        for hostname, device in matched.items():
+            self._step(f"{hostname} is {self._device_label(device)}")
+            self.added_hosts.add(hostname)
+            self._set_host_variables(hostname, device)
+            if self.device_groups_as_ansible_groups:
+                self._add_host_to_device_groups(device.get("device_id"), hostname, membership)
+
+        self._step(f"{len(matched)} of {len(hostnames)} hosts enriched")
 
     def _resolve_api_token(self):
         """Use Ansible's Templar to get the api_token from a separate Ansible variable.
@@ -1628,6 +1813,14 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             self.get_option("hardware_trimming_patterns")
         )
         self.lowercase_hardware_family = self.get_option("lowercase_hardware_family")
+
+        self.mode = self.get_option("mode")
+        self.match_fields = [f for f in (self.get_option("match_fields") or []) if f]
+        self.match_host_var = self.get_option("match_host_var")
+        self.on_unmatched = self.get_option("on_unmatched")
+        if self.mode == "enrich" and not self.match_fields:
+            raise AnsibleError("librenms: mode is enrich, but match_fields is empty.")
+        self._step(f"mode is {self.mode}")
 
         self.cache_force_update = self.get_option("cache_force_update")
         self.use_cache = cache

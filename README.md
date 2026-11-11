@@ -463,6 +463,91 @@ and run all sources together:
 ansible-inventory -v --list -i librenms.yml -i constructed.yml
 ```
 
+## Enrich mode: validating a static inventory
+
+By default the plugin is the inventory: every LibreNMS device becomes a host. With
+`mode: enrich` it adds no hosts. It looks up the hosts you already wrote in a static
+inventory, sets the same `libre_<field>` host vars and device groups on each one, and
+fails if any of them is missing from LibreNMS.
+
+```ini
+# hosts.ini
+[switches]
+core-sw1
+switch-a ansible_host=10.0.0.2
+```
+
+```yaml
+# librenms_enrich.yml
+plugin: librenms
+api_endpoint: https://librenms.example.com/api/v0
+mode: enrich
+```
+
+```bash
+ansible-inventory --list -i hosts.ini -i librenms_enrich.yml
+```
+
+See `examples/librenms_enrich.yml.dist` for a starting point.
+
+### Order matters
+
+The plugin only sees hosts from inventory sources parsed *before* it. Name the static
+inventory first on the command line, or, in an inventory directory, give the files names
+that sort that way (`10-hosts.ini`, `20-librenms_enrich.yml`). If there are no hosts at
+all when it runs, the plugin fails rather than passing with nothing checked.
+
+### How a host is matched
+
+Each host is looked up by its inventory hostname and by the host var named in
+`match_host_var` (`ansible_host` by default). Both are compared against the device fields
+in `match_fields` (`hostname`, `sysName` and `ip` by default). The comparison ignores
+case and surrounding whitespace.
+
+| Host | Matches the device with |
+| --- | --- |
+| `core-sw1` | `sysName: core-sw1` |
+| `core-sw1.example.com` | `hostname: core-sw1.example.com` |
+| `switch-a ansible_host=10.0.0.2` | `ip: 10.0.0.2` |
+
+A host that matches two different devices is **ambiguous** and always fails the run.
+This happens, for example, when its name matches one device and its `ansible_host`
+matches another.
+
+Only vars set by an earlier inventory source are visible to the match. `host_vars/` files
+are not, because Ansible loads them after every inventory source has been parsed.
+
+### When a host is not found
+
+With `on_unmatched: error` (the default), the inventory source fails and the error lists
+every unmatched host at once. No host gets any LibreNMS vars. With
+`on_unmatched: warn`, each unmatched host gets a warning and is left as it is, and the
+other hosts are enriched normally.
+
+**By default Ansible does not stop when an inventory source fails.** It prints
+`Unable to parse ... as an inventory source` and carries on with the hosts from the
+other sources. Here, those are the static hosts, now without any validation. To make
+the failure stop the run, set this in `ansible.cfg` (as `examples/ansible.cfg.example`
+does):
+
+```ini
+[inventory]
+any_unparsed_is_failed = true
+```
+
+or export `ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED=true`.
+
+### What changes compared with the default mode
+
+- `exclude_disabled`, `exclude_ignored`, `host_name_regex_filter` and `hostname_field` do
+  nothing, since they decide which devices become hosts. A host whose device is disabled
+  or ignored in LibreNMS still matches it. Check `libre_disabled` / `libre_ignore` in your
+  playbooks if that matters.
+- `device_status_filter` and `query_filters` still narrow the devices that are fetched,
+  so a host whose device they filter out is reported as not found.
+- A snapshot from `create_snapshot` holds the enriched hosts with only the vars and groups
+  this plugin added, not the static inventory's own vars.
+
 ## Writing the inventory to a file
 
 Set `create_snapshot` and the plugin writes the inventory it just built as a static
