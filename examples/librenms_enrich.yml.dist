@@ -1,0 +1,34 @@
+# Enrich mode: look up the hosts of a static inventory in LibreNMS instead of building
+# the inventory from LibreNMS. Name the static inventory first:
+#   ansible-inventory --list -i hosts.ini -i librenms_enrich.yml
+#
+# Set `any_unparsed_is_failed = true` under [inventory] in ansible.cfg, otherwise Ansible
+# only warns when a host is not found and carries on with the unvalidated static hosts -
+# see the README's "Enrich mode" section.
+plugin: librenms
+api_endpoint: https://librenms-host.local/api/v0
+validate_certs: true
+
+mode: enrich
+
+# Device fields a host is looked up by, matched case-insensitively against both the
+# inventory hostname and the host var named in match_host_var.
+match_fields:
+  - hostname
+  - sysName
+  - ip
+match_host_var: ansible_host
+
+# error: fail the inventory source, naming every host that was not found.
+# warn: warn about each of them and enrich the rest.
+on_unmatched: error
+
+cache: true
+cache_plugin: jsonfile
+cache_connection: /tmp/librenms_inventory_cache
+cache_timeout: 600
+
+# Device groups, hardware trimming, notes and location parsing all work as in the
+# default mode - see examples/librenms.yml.dist.
+group_name_regex_filter:
+  - ^group name1$

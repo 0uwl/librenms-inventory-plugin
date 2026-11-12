@@ -201,6 +201,7 @@ class LibrenmsInventoryTestCase(unittest.TestCase):
         request_log=None,
         config_dir=None,
         wrap_inventory=False,
+        existing_hosts=None,
         **config_overrides,
     ):
         config_path = write_config(config_dir=config_dir, **config_overrides)
@@ -212,6 +213,13 @@ class LibrenmsInventoryTestCase(unittest.TestCase):
         modname = type(plugin).__module__
         inventory = InventoryData()
         loader = DataLoader()
+
+        # Hosts an earlier inventory source (eg. a static hosts.ini) would have added,
+        # as {hostname: {var: value}}
+        for hostname, host_vars in (existing_hosts or {}).items():
+            inventory.add_host(hostname)
+            for var, value in host_vars.items():
+                inventory.set_variable(hostname, var, value)
 
         # A real run gets InventoryManager's wrapper rather than a bare InventoryData, and
         # the wrapper tags every value the plugin sets. Tests that care what the host vars
@@ -466,6 +474,118 @@ class TestFiltering(LibrenmsInventoryTestCase):
         )
 
         self.assertEqual(set(inventory.hosts.keys()), {"core-sw1", "core-sw2"})
+
+class TestEnrichMode(LibrenmsInventoryTestCase):
+    def enrich(self, existing_hosts, **overrides):
+        overrides.setdefault("mode", "enrich")
+        return self.build_plugin(existing_hosts=existing_hosts, **overrides)
+
+    def test_source_mode_is_the_default(self):
+        plugin, _ = self.build_plugin()
+        self.assertEqual(plugin.get_option("mode"), "source")
+
+    def test_adds_no_hosts_of_its_own(self):
+        _, inventory = self.enrich({"core-sw1": {}})
+        self.assertEqual(set(inventory.hosts), {"core-sw1"})
+
+    def test_matches_by_inventory_hostname_against_sysname(self):
+        _, inventory = self.enrich({"core-sw1": {}})
+        host_vars = inventory.get_host("core-sw1").vars
+        self.assertEqual(host_vars["libre_device_id"], 1)
+        self.assertEqual(host_vars["libre_os"], "ios")
+
+    def test_matches_by_fqdn_against_hostname(self):
+        _, inventory = self.enrich({"core-sw2.example.com": {}})
+        self.assertEqual(inventory.get_host("core-sw2.example.com").vars["libre_device_id"], 2)
+
+    def test_matches_case_insensitively(self):
+        _, inventory = self.enrich({"CORE-SW1": {}})
+        self.assertEqual(inventory.get_host("CORE-SW1").vars["libre_device_id"], 1)
+
+    def test_matches_by_ansible_host_ip(self):
+        _, inventory = self.enrich({"switch-a": {"ansible_host": "10.0.0.2"}})
+        host_vars = inventory.get_host("switch-a").vars
+        self.assertEqual(host_vars["libre_device_id"], 2)
+        # The static source's own vars are left alone
+        self.assertEqual(host_vars["ansible_host"], "10.0.0.2")
+
+    def test_match_host_var_is_configurable(self):
+        _, inventory = self.enrich(
+            {"switch-a": {"mgmt_ip": "10.0.0.1"}}, match_host_var="mgmt_ip"
+        )
+        self.assertEqual(inventory.get_host("switch-a").vars["libre_device_id"], 1)
+
+    def test_match_fields_restricts_what_is_matched(self):
+        with self.assertRaisesRegex(AnsibleError, "not found in LibreNMS: core-sw1"):
+            self.enrich({"core-sw1": {}}, match_fields=["ip"])
+
+    def test_unmatched_hosts_are_all_named_in_one_error(self):
+        with self.assertRaises(AnsibleError) as ctx:
+            self.enrich({"core-sw1": {}, "ghost-1": {}, "ghost-2": {}})
+        self.assertIn("not found in LibreNMS: ghost-1, ghost-2", str(ctx.exception))
+
+    def test_error_leaves_matched_hosts_untouched(self):
+        plugin = get_plugin_instance()
+        inventory = InventoryData()
+        inventory.add_host("core-sw1")
+        inventory.add_host("ghost")
+        config = write_config(mode="enrich")
+        self._configs.append(config)
+        with mock.patch(type(plugin).__module__ + ".open_url", make_open_url()), \
+                self.assertRaises(AnsibleError):
+            plugin.parse(inventory, DataLoader(), config, cache=False)
+        self.assertNotIn("libre_device_id", inventory.get_host("core-sw1").vars)
+
+    def test_warn_enriches_the_rest(self):
+        warnings = []
+        with mock.patch.object(Display, "warning", warnings.append):
+            _, inventory = self.enrich({"core-sw1": {}, "ghost": {}}, on_unmatched="warn")
+        self.assertEqual(inventory.get_host("core-sw1").vars["libre_device_id"], 1)
+        self.assertNotIn("libre_device_id", inventory.get_host("ghost").vars)
+        self.assertTrue(any("ghost" in w for w in warnings))
+
+    def test_name_and_address_matching_different_devices_is_ambiguous(self):
+        with self.assertRaisesRegex(AnsibleError, "more than one device: core-sw1"):
+            self.enrich({"core-sw1": {"ansible_host": "10.0.0.2"}}, on_unmatched="warn")
+
+    def test_name_and_address_matching_the_same_device_is_not_ambiguous(self):
+        _, inventory = self.enrich({"core-sw1": {"ansible_host": "10.0.0.1"}})
+        self.assertEqual(inventory.get_host("core-sw1").vars["libre_device_id"], 1)
+
+    def test_no_hosts_to_enrich_is_an_error(self):
+        with self.assertRaisesRegex(AnsibleError, "no hosts to enrich"):
+            self.enrich({})
+
+    def test_empty_match_fields_is_rejected(self):
+        with self.assertRaisesRegex(AnsibleError, "match_fields is empty"):
+            self.enrich({"core-sw1": {}}, match_fields=[])
+
+    def test_disabled_and_ignored_devices_still_match(self):
+        _, inventory = self.enrich({"edge-fw1.example.com": {}, "old-switch": {}})
+        self.assertEqual(inventory.get_host("edge-fw1.example.com").vars["libre_disabled"], 1)
+        self.assertEqual(inventory.get_host("old-switch").vars["libre_ignore"], 1)
+
+    def test_device_groups_are_applied(self):
+        _, inventory = self.enrich({"core-sw1": {}})
+        self.assertIn("core-sw1", [h.name for h in inventory.groups["Core"].get_hosts()])
+
+    def test_sensitive_fields_stay_excluded(self):
+        _, inventory = self.enrich({"core-sw1": {}})
+        self.assertNotIn("libre_community", inventory.get_host("core-sw1").vars)
+
+    def test_snapshot_holds_only_what_this_plugin_added(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "out.yml")
+            self.enrich(
+                {"core-sw1": {"ansible_host": "10.0.0.1"}},
+                create_snapshot=True,
+                snapshot_file=target,
+            )
+            snapshot = load_snapshot(target)
+        host_vars = snapshot["all"]["hosts"]["core-sw1"]
+        self.assertEqual(host_vars["libre_device_id"], 1)
+        self.assertNotIn("ansible_host", host_vars)
+
 
 class TestHardwareTrimming(LibrenmsInventoryTestCase):
     # Keyed on the LibreNMS os rather than a vendor, since os is always populated and
