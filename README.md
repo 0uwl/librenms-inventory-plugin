@@ -43,7 +43,7 @@ point:
 plugin: librenms
 api_endpoint: https://librenms.example.com/api/v0
 # api_token is best provided via the LIBRENMS_TOKEN environment variable or through a 
-# vault variable (see example bellow) instead of committing it to this file.
+# vault variable (see example below) instead of committing it to this file.
 validate_certs: true
 
 cache: true
@@ -701,7 +701,9 @@ it, so a run that "worked" but produced the wrong thing explains itself:
 | `LibreNMS returned no devices` | `device_status_filter` or `query_filters` matched nothing, or the token cannot see devices |
 | `every device was filtered out` | `exclude_disabled`, `exclude_ignored` or `host_name_regex_filter` is too strict |
 | `group_name_regex_filter matched none of the device groups` | The regexes do not match any LibreNMS device group name |
-| `device <name> has no <field>, naming it <uuid>` | `hostname_field` names a field this device does not have |
+| `device <name> has no <field> that is usable as an ASCII hostname, naming it <uuid>` | `hostname_field` names a field this device does not have, or its value is written only in characters with no ASCII equivalent (eg. CJK) |
+| `device <name> has the same hostname as device <name>, skipping it` | Two devices give the same hostname (eg. a reused `sysName`). The first one LibreNMS returns is added, the rest are skipped |
+| `<host>: notes field is not a string` | LibreNMS returned a non-text Notes value, so it is not parsed |
 | `api_token did not resolve to a value` | The vault/extra var referenced by `api_token` is not defined |
 | `<host>: notes field is YAML but not a mapping of vars` | The Notes field parses, but not into `key: value` pairs |
 | `<host>: location field has no site` | `location` doesn't start with a site before the first `;` - see [Parsing the location field](#parsing-the-location-field-into-rackunit-positions) |

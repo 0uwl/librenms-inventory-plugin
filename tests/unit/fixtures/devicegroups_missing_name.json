@@ -1,0 +1,16 @@
+{
+    "status": "ok",
+    "groups": [
+        {
+            "id": 1,
+            "name": "Core"
+        },
+        {
+            "id": 9
+        },
+        {
+            "id": 10,
+            "name": null
+        }
+    ]
+}

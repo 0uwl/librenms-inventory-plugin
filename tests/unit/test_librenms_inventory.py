@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import tempfile
+import textwrap
 import unittest
 import urllib.error
 import uuid
@@ -14,6 +15,7 @@ from ansible.errors import AnsibleError
 from ansible.inventory.data import InventoryData
 from ansible.inventory.manager import InventoryManager
 from ansible.parsing.dataloader import DataLoader
+from ansible.parsing.vault import VaultLib, VaultSecret, VaultSecretsContext
 from ansible.plugins.loader import inventory_loader
 from ansible.template import Templar
 from ansible.utils.display import Display
@@ -339,6 +341,16 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
 
         host_vars = inventory.get_host("custom-sw4").get_vars()
         self.assertEqual(host_vars["libre_hardware"], "C9300")
+
+    def test_notes_field_not_a_string_does_not_crash(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_notes.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_notes_field=True)
+
+        host_vars = inventory.get_host("custom-sw6").get_vars()
+        self.assertEqual(host_vars["libre_notes"], 12345)
+        self.assertNotIn("var1", host_vars)
 
     def test_notes_field_tolerates_trailing_whitespace_on_marker_line(self):
         routes = dict(DEFAULT_ROUTES)
@@ -740,6 +752,19 @@ class TestHardwareTrimming(LibrenmsInventoryTestCase):
 
     # --- named groups -----------------------------------------------------
 
+    def test_optional_first_group_that_does_not_match_falls_back_to_whole_match(self):
+        patterns = {"iosxe": [r"^(WS-)?(C\d+)[A-Z]*"]}
+
+        self.assertEqual(self.families(patterns)["core-sw1"], "C9300")
+
+    def test_optional_first_group_that_does_not_match_with_lowercase_family(self):
+        patterns = {"iosxe": [r"^(WS-)?(C\d+)[A-Z]*"]}
+
+        families = self.families(patterns, lowercase_hardware_family=True)
+
+        self.assertEqual(families["core-sw1"], "c9300")
+
+
     SRX_PATTERNS = {"junos": [r"(?:(?P<variant>node\d+) )?Juniper (?P<family>SRX\d+)"]}
 
     def test_named_groups_take_a_variant_that_precedes_the_family(self):
@@ -850,6 +875,23 @@ class TestGrouping(LibrenmsInventoryTestCase):
         # Nothing is left to name a group with, and an empty name would fail the run
         self.assertEqual(set(inventory.groups.keys()), {"all", "ungrouped"})
         self.assertIn("core-sw1", inventory.hosts)
+
+    def test_group_without_a_name_is_skipped(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups"] = "devicegroups_missing_name.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        self.assertEqual(set(inventory.groups.keys()), {"all", "ungrouped", "Core"})
+
+    def test_group_member_without_a_device_id_is_skipped(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups/Core"] = "devicegroups_member_without_id.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        core_hosts = {host.name for host in inventory.groups["Core"].get_hosts()}
+        self.assertEqual(core_hosts, {"core-sw1"})
 
     def test_names_that_convert_to_the_same_group_are_merged(self):
         routes = dict(DEFAULT_ROUTES)
@@ -1551,6 +1593,28 @@ class TestApiTokenTemplating(LibrenmsInventoryTestCase):
 
         self.assertEqual(plugin._resolve_api_token(), "resolved-secret")
 
+    def test_vault_encrypted_token_is_decrypted(self):
+        # The README and librenms.yml.dist both show api_token: !vault |
+        secret = VaultSecret(b"test-vault-password")
+        ciphertext = VaultLib([("default", secret)]).encrypt("vaulted-secret").decode()
+        config_path = write_config()
+        self._configs.append(config_path)
+        with open(config_path) as handle:
+            content = handle.read().replace('api_token: "test-token"\n', "")
+        with open(config_path, "w") as handle:
+            handle.write(content + "api_token: !vault |\n" + textwrap.indent(ciphertext, "  "))
+
+        plugin = get_plugin_instance()
+        plugin.loader = DataLoader()
+        plugin._read_config_data(path=config_path)
+        plugin._vars = {}
+        # The ansible CLI activates this process-wide once vault secrets are loaded, and
+        # it can only be initialized once, so it is patched for this test alone
+        with mock.patch.object(
+            VaultSecretsContext, "_current", VaultSecretsContext([("default", secret)])
+        ):
+            self.assertEqual(plugin._resolve_api_token(), "vaulted-secret")
+
 
 class TestIsFlagSet(unittest.TestCase):
     def test_none_is_not_set(self):
@@ -1608,6 +1672,13 @@ class TestResponseParsingErrors(LibrenmsInventoryTestCase):
         with self.assertRaises(AnsibleError):
             self.build_plugin(routes=routes)
 
+    def test_json_response_that_is_not_an_object_raises(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = RawResponse(b"[1, 2, 3]")
+
+        with self.assertRaisesRegex(AnsibleError, r"/devices is JSON but not an object"):
+            self.build_plugin(routes=routes)
+
 
 class TestHostnameDerivation(LibrenmsInventoryTestCase):
     def test_hostname_field_option_selects_custom_field(self):
@@ -1646,6 +1717,28 @@ class TestHostnameDerivation(LibrenmsInventoryTestCase):
         other_host = "hostname-only.example.com"
         (fallback_host,) = [h for h in inventory.hosts if h != other_host]
         uuid.UUID(fallback_host)  # raises ValueError if not a valid uuid string
+
+    def test_falls_back_to_uuid_when_hostname_has_no_ascii_characters(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_hostname_nonascii.json"
+
+        _, inventory = self.build_plugin(routes=routes, device_groups_as_ansible_groups=False)
+
+        other_host = "ascii-host"
+        self.assertIn(other_host, inventory.hosts)
+        (fallback_host,) = [h for h in inventory.hosts if h != other_host]
+        uuid.UUID(fallback_host)  # raises ValueError if not a valid uuid string
+
+    def test_duplicate_hostname_keeps_the_first_device(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_duplicate_hostname.json"
+
+        _, inventory = self.build_plugin(routes=routes, device_groups_as_ansible_groups=False)
+
+        self.assertEqual(set(inventory.hosts), {"dup-sw"})
+        host_vars = inventory.get_host("dup-sw").get_vars()
+        self.assertEqual(host_vars["libre_device_id"], 30)
+        self.assertEqual(host_vars["libre_serial"], "FIRST")
 
 
 class TestGroupingToggle(LibrenmsInventoryTestCase):
@@ -1790,7 +1883,21 @@ class TestDisplayMessages(LibrenmsInventoryTestCase):
         _, problems, _ = self.capture_display(hostname_field="does_not_exist")
 
         self.assertTrue(
-            any("has no does_not_exist, naming it" in m for m in problems), problems
+            any("has no does_not_exist that is usable as an ASCII hostname, naming it" in m for m in problems), problems
+        )
+
+    def test_duplicate_hostname_is_reported_at_v(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_duplicate_hostname.json"
+
+        _, problems, _ = self.capture_display(routes=routes, device_groups_as_ansible_groups=False)
+
+        self.assertTrue(
+            any(
+                "dup-sw (device_id 31) has the same hostname as device dup-sw (device_id 30)" in m
+                for m in problems
+            ),
+            problems,
         )
 
     def test_unconvertible_group_name_warns(self):

@@ -45,7 +45,10 @@ DOCUMENTATION = r"""
             type: int
             default: 60
         headers:
-            description: Extra HTTP headers to send with every request to the LibreNMS API.
+            description:
+                - Extra HTTP headers to send with every request to the LibreNMS API.
+                - They are applied after the token, so an C(X-Auth-Token) set here replaces
+                  I(api_token).
             type: dict
             default: {}
         mode:
@@ -199,6 +202,9 @@ DOCUMENTATION = r"""
             description:
                 - Extra raw C(key=value) query string parameters appended to the C(/devices)
                   API request, e.g. C(os=ios).
+                - Values are sent exactly as written, so they have to be URL-encoded already -
+                  C(location=Main%20Street), not C(location=Main Street). A space, C(&) or
+                  C(#) left in a value breaks the query string.
             type: list
             elements: str
             default: []
@@ -245,6 +251,8 @@ DOCUMENTATION = r"""
             description:
                 - LibreNMS device field to use as the Ansible inventory hostname.
                 - By default C(sysName) is used, falling back to C(hostname) if C(sysName) is empty.
+                - When two devices end up with the same hostname, the first one LibreNMS
+                  returns is added and the later ones are skipped, with a message at C(-v).
             type: str
         device_groups_as_ansible_groups:
             description:
@@ -340,6 +348,8 @@ DOCUMENTATION = r"""
                   pattern of '^WS-(C\d+[A-Z]*)' gives C(WS-C3850-24T) a family of C(C3850),
                   grouping older Catalyst switches under the same names as the 9K
                   generation. Text consumed without being captured is in neither variable.
+                  If the first group is optional and does not take part in the match, the
+                  whole match is the family.
                 - Named groups C((?P<family>...)) and C((?P<variant>...)) set the family
                   and variant explicitly, for values where the variant does not follow the
                   family - a pattern of '(?:(?P<variant>node\d+) )?Juniper (?P<family>SRX\d+)'
@@ -404,7 +414,7 @@ group_name_mapping:
 # ansible_network_os), add a second inventory source using Ansible's standard
 # `constructed` plugin over this one's output - see the README's Grouping section.
 
-# Enable this to read the Notes value as YAML and derrive additional host vars from it
+# Enable this to read the Notes value as YAML and derive additional host vars from it
 parse_notes_field: false
 
 # Parse the location field as <site>;[<room>];[<rack>];[[<stack_nr>]u<u_nr>];... to get
@@ -629,6 +639,14 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 f"Body was: {raw}"
             )
 
+        # Every endpoint this plugin calls answers with an object; anything else (eg. a
+        # bare list) is not LibreNMS, and would otherwise fail later on a .get()
+        if not isinstance(payload, dict):
+            raise AnsibleError(
+                f"Response from {url} is JSON but not an object. Check api_endpoint "
+                f"correctness. Body was: {raw}"
+            )
+
         self._step(f"response from {url} parsed")
         return payload
 
@@ -718,6 +736,15 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         all_groups = payload.get("groups", [])
         self._step(f"{len(all_groups)} device groups returned")
 
+        # Everything below keys on the name, so a group without one can not be used
+        nameless = [group for group in all_groups if not isinstance(group.get("name"), str)]
+        if nameless:
+            self._problem(
+                f"skipping {len(nameless)} device groups that have no name: "
+                f"{', '.join(str(group.get('id', '?')) for group in nameless)} (by id)"
+            )
+            all_groups = [group for group in all_groups if group not in nameless]
+
         # A key that matches nothing would otherwise be silent, and a name that differs
         # only in case or in a stray space looks right in the inventory source
         unmatched = sorted(set(self.group_name_mapping) - {group["name"] for group in all_groups})
@@ -789,6 +816,11 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             members = member_payload.get("devices", [])
             self._step(f"device group {group['name']} has {len(members)} members")
             for device in members:
+                if device.get("device_id") is None:
+                    self._problem(
+                        f"device group {group['name']} lists a member with no device_id, skipping it"
+                    )
+                    continue
                 membership[device["device_id"]].append(group_name)
 
         self._step(f"{len(membership)} devices belong to at least one device group")
@@ -862,13 +894,15 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         fields = [self.hostname_field] if self.hostname_field else ["sysName", "hostname"]
         for field in fields:
             value = device.get(field)
-            if value:
-                return self._ascii_hostname(str(value))
+            # A value written entirely in a script with no ASCII equivalent (eg. CJK)
+            # converts to nothing, which counts the same as the field being empty
+            if value and (converted := self._ascii_hostname(str(value))):
+                return converted
 
         generated = str(uuid.uuid4())
         self._problem(
-            f"device {self._device_label(device)} has no {' or '.join(fields)}, "
-            f"naming it {generated}"
+            f"device {self._device_label(device)} has no {' or '.join(fields)} that is "
+            f"usable as an ASCII hostname, naming it {generated}"
         )
         return generated
 
@@ -966,9 +1000,16 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             notes_value (str): the raw notes field taken from the API
 
         Returns:
-            parsed_variables(dict): A dictionary of key-value parsed from the notes field
+            parsed_variables(dict): A dictionary of key-value parsed from the notes field,
+                or None if the value isn't a string or isn't YAML vars
         """
         self._step(f"{hostname}: parsing the notes field")
+
+        # notes is normally a string, but nothing enforces that API-side so we
+        # should guard it, same as the location field
+        if not isinstance(notes_value, str):
+            self._problem(f"{hostname}: notes field is not a string, skipping notes parsing")
+            return None
 
         if notes_value.splitlines()[0].strip() != '---':
             self._step(f"{hostname}: notes field does not start with '---', not parsing")
@@ -1176,7 +1217,9 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 if "family" in pattern.groupindex:
                     family = match.group("family")
                 else:
-                    family = match.group(1) if pattern.groups else match.group(0)
+                    # An optional first group that did not take part in the match is
+                    # None - fall back to the whole match rather than a null family
+                    family = (match.group(1) if pattern.groups else None) or match.group(0)
 
                 # A named variant group is for values where the variant comes before
                 # the family, eg. the cluster node on a Juniper SRX. It is None when
@@ -1575,6 +1618,8 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         Returns:
             int: The umask
         """
+        # Briefly sets the umask to 0 for the whole process, which is not thread-safe.
+        # Fine in an inventory plugin, keep it out of anything that runs in threads.
         umask = os.umask(0)
         os.umask(umask)
         return umask
@@ -1603,12 +1648,27 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         self._step(f"processing {len(devices)} devices")
         added = 0
+        # hostname -> label of the device that claimed it, so a second device with the
+        # same name can be reported against the first
+        claimed = {}
 
         for device in devices:
             if self._device_excluded(device):
                 continue
 
             hostname = self._derive_hostname(device)
+
+            # Merging the two would mix their vars into one host; the first device
+            # LibreNMS lists keeps the name, the later one is left out entirely
+            # The label alone would read the same for both, since they share a name
+            label = f"{self._device_label(device)} (device_id {device.get('device_id')})"
+            if hostname in claimed:
+                self._problem(
+                    f"device {label} has the same hostname as device {claimed[hostname]}, "
+                    f"skipping it. Only the first is added as {hostname}."
+                )
+                continue
+            claimed[hostname] = label
 
             self._step(f"adding host {hostname}")
             self.inventory.add_host(hostname)

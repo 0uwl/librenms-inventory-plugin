@@ -1,0 +1,24 @@
+{
+    "status": "ok",
+    "count": 2,
+    "devices": [
+        {
+            "device_id": 30,
+            "hostname": "10.0.0.30",
+            "sysName": "dup-sw",
+            "os": "ios",
+            "serial": "FIRST",
+            "disabled": 0,
+            "ignore": 0
+        },
+        {
+            "device_id": 31,
+            "hostname": "10.0.0.31",
+            "sysName": "dup-sw",
+            "os": "ios",
+            "serial": "SECOND",
+            "disabled": 0,
+            "ignore": 0
+        }
+    ]
+}

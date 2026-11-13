@@ -71,7 +71,9 @@ def _raw_get(path):
     request = urllib.request.Request(
         LIBRENMS_API.rstrip("/") + path, headers={"X-Auth-Token": LIBRENMS_TOKEN}
     )
-    context = ssl._create_unverified_context()
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
     try:
         with urllib.request.urlopen(request, context=context, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -250,7 +252,8 @@ class TestLiveCli(LiveLibrenmsTestCase):
         )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertNotIn("WARNING", result.stderr)
+        # Ansible's own prefix, so a device or group named eg. "WARNING-LAB" does not trip it
+        self.assertNotIn("[WARNING]", result.stderr)
         self.assertNotIn("ERROR", result.stderr)
 
         payload = json.loads(result.stdout)
