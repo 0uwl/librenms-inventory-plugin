@@ -245,6 +245,8 @@ DOCUMENTATION = r"""
             description:
                 - LibreNMS device field to use as the Ansible inventory hostname.
                 - By default C(sysName) is used, falling back to C(hostname) if C(sysName) is empty.
+                - When two devices end up with the same hostname, the first one LibreNMS
+                  returns is added and the later ones are skipped, with a message at C(-v).
             type: str
         device_groups_as_ansible_groups:
             description:
@@ -340,6 +342,8 @@ DOCUMENTATION = r"""
                   pattern of '^WS-(C\d+[A-Z]*)' gives C(WS-C3850-24T) a family of C(C3850),
                   grouping older Catalyst switches under the same names as the 9K
                   generation. Text consumed without being captured is in neither variable.
+                  If the first group is optional and does not take part in the match, the
+                  whole match is the family.
                 - Named groups C((?P<family>...)) and C((?P<variant>...)) set the family
                   and variant explicitly, for values where the variant does not follow the
                   family - a pattern of '(?:(?P<variant>node\d+) )?Juniper (?P<family>SRX\d+)'
@@ -1193,7 +1197,9 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 if "family" in pattern.groupindex:
                     family = match.group("family")
                 else:
-                    family = match.group(1) if pattern.groups else match.group(0)
+                    # An optional first group that did not take part in the match is
+                    # None - fall back to the whole match rather than a null family
+                    family = (match.group(1) if pattern.groups else None) or match.group(0)
 
                 # A named variant group is for values where the variant comes before
                 # the family, eg. the cluster node on a Juniper SRX. It is None when
@@ -1620,12 +1626,27 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
 
         self._step(f"processing {len(devices)} devices")
         added = 0
+        # hostname -> label of the device that claimed it, so a second device with the
+        # same name can be reported against the first
+        claimed = {}
 
         for device in devices:
             if self._device_excluded(device):
                 continue
 
             hostname = self._derive_hostname(device)
+
+            # Merging the two would mix their vars into one host; the first device
+            # LibreNMS lists keeps the name, the later one is left out entirely
+            # The label alone would read the same for both, since they share a name
+            label = f"{self._device_label(device)} (device_id {device.get('device_id')})"
+            if hostname in claimed:
+                self._problem(
+                    f"device {label} has the same hostname as device {claimed[hostname]}, "
+                    f"skipping it. Only the first is added as {hostname}."
+                )
+                continue
+            claimed[hostname] = label
 
             self._step(f"adding host {hostname}")
             self.inventory.add_host(hostname)

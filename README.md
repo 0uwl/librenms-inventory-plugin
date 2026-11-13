@@ -702,6 +702,7 @@ it, so a run that "worked" but produced the wrong thing explains itself:
 | `every device was filtered out` | `exclude_disabled`, `exclude_ignored` or `host_name_regex_filter` is too strict |
 | `group_name_regex_filter matched none of the device groups` | The regexes do not match any LibreNMS device group name |
 | `device <name> has no <field> that is usable as an ASCII hostname, naming it <uuid>` | `hostname_field` names a field this device does not have, or its value is written only in characters with no ASCII equivalent (eg. CJK) |
+| `device <name> has the same hostname as device <name>, skipping it` | Two devices give the same hostname (eg. a reused `sysName`). The first one LibreNMS returns is added, the rest are skipped |
 | `<host>: notes field is not a string` | LibreNMS returned a non-text Notes value, so it is not parsed |
 | `api_token did not resolve to a value` | The vault/extra var referenced by `api_token` is not defined |
 | `<host>: notes field is YAML but not a mapping of vars` | The Notes field parses, but not into `key: value` pairs |

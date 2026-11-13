@@ -750,6 +750,19 @@ class TestHardwareTrimming(LibrenmsInventoryTestCase):
 
     # --- named groups -----------------------------------------------------
 
+    def test_optional_first_group_that_does_not_match_falls_back_to_whole_match(self):
+        patterns = {"iosxe": [r"^(WS-)?(C\d+)[A-Z]*"]}
+
+        self.assertEqual(self.families(patterns)["core-sw1"], "C9300")
+
+    def test_optional_first_group_that_does_not_match_with_lowercase_family(self):
+        patterns = {"iosxe": [r"^(WS-)?(C\d+)[A-Z]*"]}
+
+        families = self.families(patterns, lowercase_hardware_family=True)
+
+        self.assertEqual(families["core-sw1"], "c9300")
+
+
     SRX_PATTERNS = {"junos": [r"(?:(?P<variant>node\d+) )?Juniper (?P<family>SRX\d+)"]}
 
     def test_named_groups_take_a_variant_that_precedes_the_family(self):
@@ -1675,6 +1688,17 @@ class TestHostnameDerivation(LibrenmsInventoryTestCase):
         (fallback_host,) = [h for h in inventory.hosts if h != other_host]
         uuid.UUID(fallback_host)  # raises ValueError if not a valid uuid string
 
+    def test_duplicate_hostname_keeps_the_first_device(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_duplicate_hostname.json"
+
+        _, inventory = self.build_plugin(routes=routes, device_groups_as_ansible_groups=False)
+
+        self.assertEqual(set(inventory.hosts), {"dup-sw"})
+        host_vars = inventory.get_host("dup-sw").get_vars()
+        self.assertEqual(host_vars["libre_device_id"], 30)
+        self.assertEqual(host_vars["libre_serial"], "FIRST")
+
 
 class TestGroupingToggle(LibrenmsInventoryTestCase):
     def test_disabling_device_groups_skips_devicegroups_endpoint(self):
@@ -1819,6 +1843,20 @@ class TestDisplayMessages(LibrenmsInventoryTestCase):
 
         self.assertTrue(
             any("has no does_not_exist that is usable as an ASCII hostname, naming it" in m for m in problems), problems
+        )
+
+    def test_duplicate_hostname_is_reported_at_v(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_duplicate_hostname.json"
+
+        _, problems, _ = self.capture_display(routes=routes, device_groups_as_ansible_groups=False)
+
+        self.assertTrue(
+            any(
+                "dup-sw (device_id 31) has the same hostname as device dup-sw (device_id 30)" in m
+                for m in problems
+            ),
+            problems,
         )
 
     def test_unconvertible_group_name_warns(self):
