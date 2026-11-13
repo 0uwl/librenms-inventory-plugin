@@ -45,7 +45,10 @@ DOCUMENTATION = r"""
             type: int
             default: 60
         headers:
-            description: Extra HTTP headers to send with every request to the LibreNMS API.
+            description:
+                - Extra HTTP headers to send with every request to the LibreNMS API.
+                - They are applied after the token, so an C(X-Auth-Token) set here replaces
+                  I(api_token).
             type: dict
             default: {}
         mode:
@@ -199,6 +202,9 @@ DOCUMENTATION = r"""
             description:
                 - Extra raw C(key=value) query string parameters appended to the C(/devices)
                   API request, e.g. C(os=ios).
+                - Values are sent exactly as written, so they have to be URL-encoded already -
+                  C(location=Main%20Street), not C(location=Main Street). A space, C(&) or
+                  C(#) left in a value breaks the query string.
             type: list
             elements: str
             default: []
@@ -408,7 +414,7 @@ group_name_mapping:
 # ansible_network_os), add a second inventory source using Ansible's standard
 # `constructed` plugin over this one's output - see the README's Grouping section.
 
-# Enable this to read the Notes value as YAML and derrive additional host vars from it
+# Enable this to read the Notes value as YAML and derive additional host vars from it
 parse_notes_field: false
 
 # Parse the location field as <site>;[<room>];[<rack>];[[<stack_nr>]u<u_nr>];... to get
@@ -730,6 +736,15 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         all_groups = payload.get("groups", [])
         self._step(f"{len(all_groups)} device groups returned")
 
+        # Everything below keys on the name, so a group without one can not be used
+        nameless = [group for group in all_groups if not isinstance(group.get("name"), str)]
+        if nameless:
+            self._problem(
+                f"skipping {len(nameless)} device groups that have no name: "
+                f"{', '.join(str(group.get('id', '?')) for group in nameless)} (by id)"
+            )
+            all_groups = [group for group in all_groups if group not in nameless]
+
         # A key that matches nothing would otherwise be silent, and a name that differs
         # only in case or in a stray space looks right in the inventory source
         unmatched = sorted(set(self.group_name_mapping) - {group["name"] for group in all_groups})
@@ -801,6 +816,11 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             members = member_payload.get("devices", [])
             self._step(f"device group {group['name']} has {len(members)} members")
             for device in members:
+                if device.get("device_id") is None:
+                    self._problem(
+                        f"device group {group['name']} lists a member with no device_id, skipping it"
+                    )
+                    continue
                 membership[device["device_id"]].append(group_name)
 
         self._step(f"{len(membership)} devices belong to at least one device group")
@@ -1598,6 +1618,8 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         Returns:
             int: The umask
         """
+        # Briefly sets the umask to 0 for the whole process, which is not thread-safe.
+        # Fine in an inventory plugin, keep it out of anything that runs in threads.
         umask = os.umask(0)
         os.umask(umask)
         return umask

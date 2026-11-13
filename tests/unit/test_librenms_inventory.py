@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import tempfile
+import textwrap
 import unittest
 import urllib.error
 import uuid
@@ -14,6 +15,7 @@ from ansible.errors import AnsibleError
 from ansible.inventory.data import InventoryData
 from ansible.inventory.manager import InventoryManager
 from ansible.parsing.dataloader import DataLoader
+from ansible.parsing.vault import VaultLib, VaultSecret, VaultSecretsContext
 from ansible.plugins.loader import inventory_loader
 from ansible.template import Templar
 from ansible.utils.display import Display
@@ -874,6 +876,23 @@ class TestGrouping(LibrenmsInventoryTestCase):
         self.assertEqual(set(inventory.groups.keys()), {"all", "ungrouped"})
         self.assertIn("core-sw1", inventory.hosts)
 
+    def test_group_without_a_name_is_skipped(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups"] = "devicegroups_missing_name.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        self.assertEqual(set(inventory.groups.keys()), {"all", "ungrouped", "Core"})
+
+    def test_group_member_without_a_device_id_is_skipped(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devicegroups/Core"] = "devicegroups_member_without_id.json"
+
+        _, inventory = self.build_plugin(routes=routes)
+
+        core_hosts = {host.name for host in inventory.groups["Core"].get_hosts()}
+        self.assertEqual(core_hosts, {"core-sw1"})
+
     def test_names_that_convert_to_the_same_group_are_merged(self):
         routes = dict(DEFAULT_ROUTES)
         routes["/devicegroups"] = "devicegroups_colliding.json"
@@ -1573,6 +1592,28 @@ class TestApiTokenTemplating(LibrenmsInventoryTestCase):
         plugin._vars = {"my_vaulted_token": "resolved-secret"}
 
         self.assertEqual(plugin._resolve_api_token(), "resolved-secret")
+
+    def test_vault_encrypted_token_is_decrypted(self):
+        # The README and librenms.yml.dist both show api_token: !vault |
+        secret = VaultSecret(b"test-vault-password")
+        ciphertext = VaultLib([("default", secret)]).encrypt("vaulted-secret").decode()
+        config_path = write_config()
+        self._configs.append(config_path)
+        with open(config_path) as handle:
+            content = handle.read().replace('api_token: "test-token"\n', "")
+        with open(config_path, "w") as handle:
+            handle.write(content + "api_token: !vault |\n" + textwrap.indent(ciphertext, "  "))
+
+        plugin = get_plugin_instance()
+        plugin.loader = DataLoader()
+        plugin._read_config_data(path=config_path)
+        plugin._vars = {}
+        # The ansible CLI activates this process-wide once vault secrets are loaded, and
+        # it can only be initialized once, so it is patched for this test alone
+        with mock.patch.object(
+            VaultSecretsContext, "_current", VaultSecretsContext([("default", secret)])
+        ):
+            self.assertEqual(plugin._resolve_api_token(), "vaulted-secret")
 
 
 class TestIsFlagSet(unittest.TestCase):

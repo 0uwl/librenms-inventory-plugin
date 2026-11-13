@@ -43,7 +43,7 @@ point:
 plugin: librenms
 api_endpoint: https://librenms.example.com/api/v0
 # api_token is best provided via the LIBRENMS_TOKEN environment variable or through a 
-# vault variable (see example bellow) instead of committing it to this file.
+# vault variable (see example below) instead of committing it to this file.
 validate_certs: true
 
 cache: true

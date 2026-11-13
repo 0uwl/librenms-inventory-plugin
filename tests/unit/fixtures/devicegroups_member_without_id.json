@@ -1,0 +1,12 @@
+{
+    "status": "ok",
+    "count": 2,
+    "devices": [
+        {
+            "device_id": 1
+        },
+        {
+            "hostname": "no-id"
+        }
+    ]
+}
