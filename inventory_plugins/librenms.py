@@ -629,6 +629,14 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
                 f"Body was: {raw}"
             )
 
+        # Every endpoint this plugin calls answers with an object; anything else (eg. a
+        # bare list) is not LibreNMS, and would otherwise fail later on a .get()
+        if not isinstance(payload, dict):
+            raise AnsibleError(
+                f"Response from {url} is JSON but not an object. Check api_endpoint "
+                f"correctness. Body was: {raw}"
+            )
+
         self._step(f"response from {url} parsed")
         return payload
 
@@ -862,13 +870,15 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         fields = [self.hostname_field] if self.hostname_field else ["sysName", "hostname"]
         for field in fields:
             value = device.get(field)
-            if value:
-                return self._ascii_hostname(str(value))
+            # A value written entirely in a script with no ASCII equivalent (eg. CJK)
+            # converts to nothing, which counts the same as the field being empty
+            if value and (converted := self._ascii_hostname(str(value))):
+                return converted
 
         generated = str(uuid.uuid4())
         self._problem(
-            f"device {self._device_label(device)} has no {' or '.join(fields)}, "
-            f"naming it {generated}"
+            f"device {self._device_label(device)} has no {' or '.join(fields)} that is "
+            f"usable as an ASCII hostname, naming it {generated}"
         )
         return generated
 
@@ -966,9 +976,16 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             notes_value (str): the raw notes field taken from the API
 
         Returns:
-            parsed_variables(dict): A dictionary of key-value parsed from the notes field
+            parsed_variables(dict): A dictionary of key-value parsed from the notes field,
+                or None if the value isn't a string or isn't YAML vars
         """
         self._step(f"{hostname}: parsing the notes field")
+
+        # notes is normally a string, but nothing enforces that API-side so we
+        # should guard it, same as the location field
+        if not isinstance(notes_value, str):
+            self._problem(f"{hostname}: notes field is not a string, skipping notes parsing")
+            return None
 
         if notes_value.splitlines()[0].strip() != '---':
             self._step(f"{hostname}: notes field does not start with '---', not parsing")

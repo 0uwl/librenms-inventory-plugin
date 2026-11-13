@@ -340,6 +340,16 @@ class TestBasicParsing(LibrenmsInventoryTestCase):
         host_vars = inventory.get_host("custom-sw4").get_vars()
         self.assertEqual(host_vars["libre_hardware"], "C9300")
 
+    def test_notes_field_not_a_string_does_not_crash(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_notes.json"
+
+        _, inventory = self.build_plugin(routes=routes, parse_notes_field=True)
+
+        host_vars = inventory.get_host("custom-sw6").get_vars()
+        self.assertEqual(host_vars["libre_notes"], 12345)
+        self.assertNotIn("var1", host_vars)
+
     def test_notes_field_tolerates_trailing_whitespace_on_marker_line(self):
         routes = dict(DEFAULT_ROUTES)
         routes["/devices"] = "devices_notes.json"
@@ -1608,6 +1618,13 @@ class TestResponseParsingErrors(LibrenmsInventoryTestCase):
         with self.assertRaises(AnsibleError):
             self.build_plugin(routes=routes)
 
+    def test_json_response_that_is_not_an_object_raises(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = RawResponse(b"[1, 2, 3]")
+
+        with self.assertRaisesRegex(AnsibleError, r"/devices is JSON but not an object"):
+            self.build_plugin(routes=routes)
+
 
 class TestHostnameDerivation(LibrenmsInventoryTestCase):
     def test_hostname_field_option_selects_custom_field(self):
@@ -1644,6 +1661,17 @@ class TestHostnameDerivation(LibrenmsInventoryTestCase):
         _, inventory = self.build_plugin(routes=routes, device_groups_as_ansible_groups=False)
 
         other_host = "hostname-only.example.com"
+        (fallback_host,) = [h for h in inventory.hosts if h != other_host]
+        uuid.UUID(fallback_host)  # raises ValueError if not a valid uuid string
+
+    def test_falls_back_to_uuid_when_hostname_has_no_ascii_characters(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_hostname_nonascii.json"
+
+        _, inventory = self.build_plugin(routes=routes, device_groups_as_ansible_groups=False)
+
+        other_host = "ascii-host"
+        self.assertIn(other_host, inventory.hosts)
         (fallback_host,) = [h for h in inventory.hosts if h != other_host]
         uuid.UUID(fallback_host)  # raises ValueError if not a valid uuid string
 
@@ -1790,7 +1818,7 @@ class TestDisplayMessages(LibrenmsInventoryTestCase):
         _, problems, _ = self.capture_display(hostname_field="does_not_exist")
 
         self.assertTrue(
-            any("has no does_not_exist, naming it" in m for m in problems), problems
+            any("has no does_not_exist that is usable as an ASCII hostname, naming it" in m for m in problems), problems
         )
 
     def test_unconvertible_group_name_warns(self):
