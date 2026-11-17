@@ -13,12 +13,12 @@ DOCUMENTATION = r"""
           grouping or composed vars, chain Ansible's standard C(constructed) inventory
           plugin as a second inventory source over this one's output.
         - With I(mode=enrich) it adds no hosts itself, and instead looks up the hosts an
-          earlier inventory source defined, failing when one is not in LibreNMS.
+          earlier inventory source defined, failing when a host is not found in LibreNMS.
     extends_documentation_fragment:
         - inventory_cache
     options:
         plugin:
-            description: Token that ensures this is a source file for the C(librenms) plugin.
+            description: Defines this is file as a source file for the C(librenms) plugin.
             required: true
             choices: ['librenms']
         api_endpoint:
@@ -55,33 +55,33 @@ DOCUMENTATION = r"""
             description:
                 - What this inventory source does with the devices it fetches.
                 - C(source) makes every LibreNMS device a host. This is the default.
-                - C(enrich) adds no hosts of its own. It goes through the hosts an inventory
+                - C(enrich) adds no hosts of its own. It goes through the hosts which an inventory
                   source parsed before it (eg. a static C(hosts.ini)), looks each one up in
                   LibreNMS, and sets the same C(libre_<field>) host vars and device group
-                  memberships on it that C(source) would. A host that cannot be found is an
-                  error, or a warning, as I(on_unmatched) says.
+                  memberships on it the same way that C(source) would. A host that cannot
+                  be found is an error, or a warning, as I(on_unmatched) says.
                 - In C(enrich) the static source has to come first, so it must be named
                   before this one on the command line (C(-i hosts.ini -i librenms.yml)), or
                   sort before it inside an inventory directory. With no hosts to enrich, the
                   run fails rather than passing with nothing checked.
                 - Ansible only warns when an inventory source fails and carries on with the
-                  hosts the other sources gave it - unvalidated ones, in C(enrich). Set
+                  hosts which the other sources gave it. Set
                   C(any_unparsed_is_failed = true) in the C([inventory]) section of
                   C(ansible.cfg) (or C(ANSIBLE_INVENTORY_ANY_UNPARSED_IS_FAILED=true)) for an
                   error to stop the run.
                 - In C(enrich), I(exclude_disabled), I(exclude_ignored),
                   I(host_name_regex_filter) and I(hostname_field) do not apply, since they
                   decide which devices become hosts. A host whose device is disabled or
-                  ignored in LibreNMS still matches it, and C(libre_disabled) and
-                  C(libre_ignore) say so. I(device_status_filter) and I(query_filters) still
-                  narrow the devices fetched, so a host whose device they leave out is not
-                  found.
+                  ignored in LibreNMS still matches, and C(libre_disabled) and
+                  C(libre_ignore) are set to reflect this. I(device_status_filter) and
+                  I(query_filters) still narrow the devices fetched, so a host whose device
+                  they leave out is not found.
             type: str
             choices: [source, enrich]
             default: source
         match_fields:
             description:
-                - In I(mode=enrich), the LibreNMS device fields a host is looked up by.
+                - In I(mode=enrich), the LibreNMS device fields which a host is looked up by.
                 - Matched case-insensitively, ignoring surrounding whitespace, after the same
                   ASCII folding hostnames get in C(source) mode.
             type: list
@@ -89,8 +89,8 @@ DOCUMENTATION = r"""
             default: [hostname, sysName, ip]
         match_host_var:
             description:
-                - In I(mode=enrich), a host var holding a second name or address to look the
-                  host up by, alongside its inventory hostname.
+                - In I(mode=enrich), a host var to look the host up by, in addition to its
+                  inventory hostname.
                 - Only vars set by an earlier inventory source are visible, not
                   C(host_vars/) files, which Ansible loads after every source is parsed.
                 - When the inventory hostname and this var match two different devices, the
@@ -99,7 +99,7 @@ DOCUMENTATION = r"""
             default: ansible_host
         on_unmatched:
             description:
-                - In I(mode=enrich), what to do with a host no LibreNMS device matches.
+                - In I(mode=enrich), what to do with a host with no matches in LibreNMS.
                 - C(error) fails the inventory source, naming every unmatched host at once.
                   Nothing is set on any host.
                 - C(warn) prints a warning per unmatched host, leaves it as it is, and
@@ -333,7 +333,7 @@ group_name_regex_filter:
 # reports it; values are used as the Ansible group name as given.
 group_name_mapping:
   Cisco devices: os_iosxe
-  Network Core: core
+  "Network Core": core
 
 # For property-based grouping (os, location, ...) or composed vars (eg. ansible_host,
 # ansible_network_os), add a second inventory source using Ansible's standard
@@ -375,9 +375,8 @@ from ansible.module_utils.common.text.converters import to_text
 from ansible.module_utils.urls import open_url
 from ansible.plugins.inventory import BaseInventoryPlugin, Cacheable
 
-# Ansible creates these two itself for every inventory (see InventoryData.__init__), so a
-# LibreNMS device group of the same name silently merges into one of them instead of
-# becoming a group of its own.
+# Ansible creates these two groups itself for every inventory (see InventoryData.__init__), so a
+# LibreNMS device group of the same name merges into one of them instead of becoming a group of its own.
 IMPLICIT_GROUPS = ("all", "ungrouped")
 
 
