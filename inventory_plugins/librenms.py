@@ -333,7 +333,7 @@ group_name_regex_filter:
 # reports it; values are used as the Ansible group name as given.
 group_name_mapping:
   Cisco devices: os_iosxe
-  Network Core: core
+  "Network Core": core
 
 # For property-based grouping (os, location, ...) or composed vars (eg. ansible_host,
 # ansible_network_os), add a second inventory source using Ansible's standard
@@ -375,9 +375,8 @@ from ansible.module_utils.common.text.converters import to_text
 from ansible.module_utils.urls import open_url
 from ansible.plugins.inventory import BaseInventoryPlugin, Cacheable
 
-# Ansible creates these two itself for every inventory (see InventoryData.__init__), so a
-# LibreNMS device group of the same name silently merges into one of them instead of
-# becoming a group of its own.
+# Ansible creates these two groups itself for every inventory (see InventoryData.__init__), so a
+# LibreNMS device group of the same name merges into one of them instead of becoming a group of its own.
 IMPLICIT_GROUPS = ("all", "ungrouped")
 
 
