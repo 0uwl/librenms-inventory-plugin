@@ -502,10 +502,11 @@ all when it runs, the plugin fails rather than passing with nothing checked.
 
 ### How a host is matched
 
-Each host is looked up by its inventory hostname and by the host var named in
-`match_host_var` (`ansible_host` by default). Both are compared against the device fields
-in `match_fields` (`hostname`, `sysName` and `ip` by default). The comparison ignores
-case and surrounding whitespace.
+Each host is looked up by the value of the host var named in `match_host_var`
+(`ansible_host` by default). A host without that var is looked up by its inventory
+hostname instead, the same fallback Ansible itself uses for `ansible_host`. The value is
+compared against the device fields in `match_fields` (`hostname`, `sysName` and `ip` by
+default), ignoring case and surrounding whitespace.
 
 | Host | Matches the device with |
 | --- | --- |
@@ -514,8 +515,8 @@ case and surrounding whitespace.
 | `switch-a ansible_host=10.0.0.2` | `ip: 10.0.0.2` |
 
 A host that matches two different devices is **ambiguous** and always fails the run.
-This happens, for example, when its name matches one device and its `ansible_host`
-matches another.
+This happens, for example, when its value is one device's `hostname` and another's
+`sysName`, or two devices share an `ip`.
 
 Only vars set by an earlier inventory source are visible to the match. `host_vars/` files
 are not, because Ansible loads them after every inventory source has been parsed.

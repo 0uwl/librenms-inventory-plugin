@@ -11,8 +11,8 @@ validate_certs: true
 
 mode: enrich
 
-# Device fields a host is looked up by, matched case-insensitively against both the
-# inventory hostname and the host var named in match_host_var.
+# Device fields a host is looked up by, matched case-insensitively against the value of
+# the host var named in match_host_var (the inventory hostname when the var is unset).
 match_fields:
   - hostname
   - sysName
