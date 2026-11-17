@@ -89,12 +89,11 @@ DOCUMENTATION = r"""
             default: [hostname, sysName, ip]
         match_host_var:
             description:
-                - In I(mode=enrich), a host var to look the host up by, in addition to its
-                  inventory hostname.
+                - In I(mode=enrich), the host var whose value the host is looked up by.
+                - A host without this var is looked up by its inventory hostname instead,
+                  the same fallback Ansible uses for C(ansible_host).
                 - Only vars set by an earlier inventory source are visible, not
                   C(host_vars/) files, which Ansible loads after every source is parsed.
-                - When the inventory hostname and this var match two different devices, the
-                  host is ambiguous, which is always an error.
             type: str
             default: ansible_host
         on_unmatched:
@@ -1247,7 +1246,7 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         return index
 
     def _match_host(self, hostname, index):
-        """Find the devices a host matches, by its name and by match_host_var
+        """Find the devices a host matches, by match_host_var, or its name when unset
 
         Args:
             hostname (str): The inventory hostname
@@ -1256,19 +1255,12 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
         Returns:
             positions(set): Positions in the device list of every device matched
         """
-        candidates = [hostname]
+        value = None
         if self.match_host_var:
             host = self.inventory.get_host(hostname)
             value = host.vars.get(self.match_host_var) if host is not None else None
-            if value is not None:
-                candidates.append(value)
-
-        positions = set()
-        for candidate in candidates:
-            key = self._match_key(candidate)
-            if key:
-                positions.update(index.get(key, ()))
-        return positions
+        key = self._match_key(hostname if value is None else value)
+        return set(index.get(key, ())) if key else set()
 
     def _populate_enrich(self):
         """Set LibreNMS host vars and groups on the hosts an earlier source added
@@ -1312,8 +1304,9 @@ class InventoryModule(BaseInventoryPlugin, Cacheable):
             problems.append("hosts not found in LibreNMS: " + ", ".join(unmatched))
         if problems:
             raise AnsibleError(
-                f"librenms: {'. '.join(problems)}. Matched on the inventory hostname and "
-                f"{self.match_host_var or 'no host var'}, against "
+                f"librenms: {'. '.join(problems)}. Matched on "
+                f"{self.match_host_var or 'the inventory hostname'} (the inventory "
+                f"hostname where unset), against "
                 f"{', '.join(self.match_fields)}."
             )
         for hostname in unmatched:

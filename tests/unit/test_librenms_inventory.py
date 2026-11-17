@@ -487,13 +487,15 @@ class TestEnrichMode(LibrenmsInventoryTestCase):
         self.assertNotIn("libre_device_id", inventory.get_host("ghost").vars)
         self.assertTrue(any("ghost" in w for w in warnings))
 
-    def test_name_and_address_matching_different_devices_is_ambiguous(self):
-        with self.assertRaisesRegex(AnsibleError, "more than one device: core-sw1"):
-            self.enrich({"core-sw1": {"ansible_host": "10.0.0.2"}}, on_unmatched="warn")
+    def test_inventory_hostname_is_ignored_when_match_host_var_is_set(self):
+        _, inventory = self.enrich({"core-sw1": {"ansible_host": "10.0.0.2"}})
+        self.assertEqual(inventory.get_host("core-sw1").vars["libre_device_id"], 2)
 
-    def test_name_and_address_matching_the_same_device_is_not_ambiguous(self):
-        _, inventory = self.enrich({"core-sw1": {"ansible_host": "10.0.0.1"}})
-        self.assertEqual(inventory.get_host("core-sw1").vars["libre_device_id"], 1)
+    def test_value_matching_two_devices_is_ambiguous(self):
+        routes = dict(DEFAULT_ROUTES)
+        routes["/devices"] = "devices_duplicate_hostname.json"
+        with self.assertRaisesRegex(AnsibleError, "more than one device: dup"):
+            self.enrich({"dup": {"ansible_host": "dup-sw"}}, routes=routes)
 
     def test_no_hosts_to_enrich_is_an_error(self):
         with self.assertRaisesRegex(AnsibleError, "no hosts to enrich"):
